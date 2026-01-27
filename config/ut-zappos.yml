@@ -1,0 +1,88 @@
+model:
+  model_name: TOMCAT
+  prompt_template: ["a photo of x x"]
+  ctx_init: ["a photo of "]
+  clip_model: "ViT-L/14"
+  clip_arch: /root/tomcat/TOMCAT/clip/ViT-L-14.pt
+
+  adapter_dim: 64
+  adapter_dropout: 0.1
+  comp_cls_loss_weight: 1
+  use_adapter: True
+
+train:
+  dataset: ut-zappos
+  dataset_path: /root/tomcat/TOMCAT/download_data/data/ut-zappos
+  optimizer: Adam
+  scheduler: StepLR
+  step_size: 5
+  gamma: 0.5
+  lr: 0.0005
+  attr_dropout: 0.3
+  weight_decay: 0.00001
+  context_length: 10
+  train_batch_size: 32
+  gradient_accumulation_steps: 4
+  seed: 0
+  epochs: 100
+  epoch_start: 0
+
+  val_metric: best_AUC
+  save_final_model: True
+  use_mixed_precision: True
+
+test:
+  eval_batch_size_wo_tta: 64
+  eval_batch_size: 1
+  # load_model:
+  topk: 1
+  text_encoder_batch_size: 1024
+
+  #open world
+  open_world: True
+  threshold:
+  threshold_trials: 50
+  bias: 0.001
+  text_first: True
+
+  num_workers: 0 #10 for train and 0 for test
+  current_epoch: -1
+
+
+  #use_mixed_precision: True
+  use_wandb: True
+
+tta:
+  shot_capacity: 3
+  cpu_cache: False
+
+  eps: 0.001
+  wd: 0.001
+  alpha: 0
+  beta: 7.5
+  theta: 1
+  text_lr: 0.000005
+  image_lr: 0.000005
+  align_loss_weight: 3.5
+
+  use_tta: True
+  use_img_cache: True
+  use_align_loss: True
+  # 方案一：层级化KAM超参数
+  lambda_orth: 0.1  # 正交损失权重（需调参，老师提供示例值）
+  hier_theta: 1.5        # AUW的温度系数（方案一示例值）
+
+  # 方案二：稳健记忆库超参数
+  correction_interval: 10  # 周期性修正间隔（每10步清洗队列）
+  sim_threshold: 0.5       # 入队相似度阈值（过滤低于0.5的离群点）
+
+others:
+  device: cuda:0 #Your_Device
+  save_path: ./result/ut-zappos/20250305_2 #Your_Save_Path
+
+  load_model: ./result/ut-zappos/20250305_2/test_best.pt
+  load_model_path: ./result/ut-zappos/20250305_2
+
+  wandb_net: online
+  use_wandb: True
+

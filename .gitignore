@@ -1,0 +1,37 @@
+# 1. 过滤模型文件（PT/CKPT/PTH等）
+*.pt
+*.pth
+*.ckpt
+*.bin
+clip/ViT-L-14.pt  # 单独指定你的CLIP模型文件
+
+# 2. 过滤数据集文件
+download_data/data/
+data/
+
+# 3. 过滤日志/缓存/结果文件
+swanlog/
+wandb/
+result/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.idea/
+.vscode/
+*.log
+*.tmp
+*.cache
+
+# 4. 过滤环境/系统文件
+*.yml.bak
+.DS_Store
+*.swp
+*.swo
+autodl*  # 容器相关文件
+
+# 5. 过滤临时/测试文件
+ablation_results/
+visualization.py  # 如果是本地测试文件
+mk.py
+swanlab_test.py
