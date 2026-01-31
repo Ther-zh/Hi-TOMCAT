@@ -68,13 +68,14 @@ tta:
   use_tta: True
   use_img_cache: True
   use_align_loss: True
+
   # 方案一：层级化KAM超参数
-  lambda_orth: 0.1  # 正交损失权重（需调参，老师提供示例值）
-  hier_theta: 1.5        # AUW的温度系数（方案一示例值）
+  lambda_orth: 0.001  # 正交损失权重
+  hier_theta: 0.8    # AUW的温度系数
 
   # 方案二：稳健记忆库超参数
-  correction_interval: 10  # 周期性修正间隔（每10步清洗队列）
-  sim_threshold: 0.5       # 入队相似度阈值（过滤低于0.5的离群点）
+  correction_interval: 20  # 周期性修正间隔
+  sim_threshold: 0.20       # 入队相似度阈值（过滤低于sim_threshold的离群点）
 
 others:
   device: cuda:0 #Your_Device
