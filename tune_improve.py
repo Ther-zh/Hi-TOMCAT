@@ -30,8 +30,8 @@ torch.backends.cudnn.benchmark = False
 TUNE_PARAMS_STAGE1 = {
     "param_names": ["lambda_orth", "hier_theta"],
     "ranges": [
-        [0.0001, 0.0005, 0.0008, 0.001, 0.002, 0.003, 0.005, 0.006, 0.007],  # lambda_orth范围
-        [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]                        # hier_theta范围
+        [0.01,0.05,0.1,0.4,0.7,1.0,1.3,1.6,2],  # lambda_orth范围
+        [0.9, 1.0, 1.1]                        # hier_theta范围
     ]
 }
 
@@ -169,79 +169,174 @@ def test(test_dset, evaluator, logits, attr_gt, obj_gt, pair_gt, config):
     return {**stats, "attr_acc": attr_acc, "obj_acc": obj_acc}
 
 # ====================== 核心工具函数（适配yml读取+调参逻辑）======================
+# ====================== 工具函数：加载/修改配置（完全对齐旧脚本，适配分阶段调参）======================
 def load_config(cfg_path):
-    """加载yml配置，返回Namespace对象（和swan_test2.py一致）"""
+    """完全复用旧脚本的配置加载逻辑：直接加载yml为字典，避免Namespace格式问题"""
     import yaml
-    from parameters import parser
-    args = parser.parse_args(["--cfg", cfg_path])
-    from utils import load_args
-    load_args(args.cfg, args)
-    return args
+    with open(cfg_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
 
-def load_improve1_best_params(params_path):
-    """加载阶段1最优改进一参数（阶段2用）"""
-    if not os.path.exists(params_path):
-        raise FileNotFoundError(f"请先运行阶段1（use_robust_cache=False）生成{params_path}")
-    with open(params_path, 'r') as f:
-        return json.load(f)
+def save_config(config, save_path):
+    """旧脚本配套的配置保存函数，保证yml格式正确"""
+    import yaml
+    with open(save_path, 'w', encoding='utf-8') as f:
+        yaml.dump(config, f, sort_keys=False)
 
 def modify_config(original_cfg, tune_params, param_values):
     """
-    动态修改配置：仅覆盖当前要调的2个参数，其余保留yml值
-    original_cfg: 从yml加载的原始配置
-    tune_params: 当前阶段的调参配置（param_names + ranges）
-    param_values: 本次实验的2个参数值
+    核心修复：完全对齐旧脚本的配置修改逻辑
+    1. lambda_orth/hier_theta 强制存入`tta`嵌套节点（代码预期读取位置）
+    2. correction_interval/sim_threshold 存入顶层（改进二参数默认位置）
+    3. 保留原始yml所有配置，仅修改调参参数
+    4. 自动识别阶段，阶段2固定改进一最优参数
     """
+    # 深拷贝原始配置，避免修改原文件
     cfg = copy.deepcopy(original_cfg)
-    # 仅覆盖要调的2个参数
-    for param_name, param_val in zip(tune_params["param_names"], param_values):
-        setattr(cfg, param_name, param_val)
-    # 生成临时配置文件（基于原始yml修改，仅改2个参数）
-    temp_cfg_path = f"temp_tune_{'_'.join([str(v) for v in param_values])}.yml"
-    import yaml
-    with open(temp_cfg_path, 'w') as f:
-        yaml.dump(vars(cfg), f, sort_keys=False)
+    # 确保核心嵌套节点存在（旧脚本逻辑，避免键不存在报错）
+    if "tta" not in cfg:
+        cfg["tta"] = {}
+    if "test" not in cfg:
+        cfg["test"] = {}
+    
+    # 1. 从yml读取阶段开关，判断当前调参阶段
+    use_robust_cache = cfg.get("use_robust_cache", False)
+    param1, param2 = tune_params["param_names"]
+    val1, val2 = param_values
+    
+    # 2. 阶段1：仅改进一（use_robust_cache=False）→ 改tta节点下的lambda_orth/hier_theta
+    if not use_robust_cache:
+        cfg["tta"][param1] = val1
+        cfg["tta"][param2] = val2
+        # 强制关闭改进二，对齐阶段1需求（旧脚本FIXED_PARAMS逻辑）
+        cfg["tta"]["use_img_cache"] = False
+    # 3. 阶段2：改进一+二（use_robust_cache=True）→ 改顶层的correction_interval/sim_threshold，固定改进一
+    else:
+        # 加载阶段1最优参数，固定到tta节点（核心：和旧脚本一致，存在tta下）
+        improve1_best = load_improve1_best_params(tune_params["improve1_best_params_path"])
+        cfg["tta"]["lambda_orth"] = improve1_best["best_lambda_orth"]
+        cfg["tta"]["hier_theta"] = improve1_best["best_hier_theta"]
+        # 开启改进二，对齐阶段2需求
+        cfg["tta"]["use_img_cache"] = True
+        # 修改改进二的调参参数（顶层，和yml配置一致）
+        cfg[param1] = val1
+        cfg[param2] = val2
+    
+    # 4. 固化基础参数（对齐旧脚本FIXED_PARAMS，分配到对应节点）
+    fixed_params = {
+        "open_world": False, "text_first": True, "use_wandb": True, "seed": 42,
+        "eval_batch_size_wo_tta": 1, "num_workers": 0, "threshold_trials": 6,
+        "shot_capacity": 3, "use_tta": True
+    }
+    test_params = ["open_world", "text_first", "use_wandb", "seed", "eval_batch_size_wo_tta", "num_workers", "threshold_trials"]
+    tta_params = ["shot_capacity", "use_tta", "use_img_cache"]
+    for k, v in fixed_params.items():
+        if k in test_params:
+            cfg["test"][k] = v
+        elif k in tta_params and k in cfg["tta"]:
+            cfg["tta"][k] = v
+    
+    # 5. 生成临时配置文件名（格式化，避免浮点数/特殊字符问题）
+    val1_fmt = f"{val1:.4f}" if isinstance(val1, float) else str(val1)
+    val2_fmt = f"{val2:.4f}" if isinstance(val2, float) else str(val2)
+    temp_cfg_path = f"temp_tune_{param1}_{val1_fmt}_{param2}_{val2_fmt}.yml"
+    # 保存临时配置（完全对齐旧脚本格式）
+    save_config(cfg, temp_cfg_path)
     return temp_cfg_path
 
+
+# def load_improve1_best_params(params_path):
+#     """加载阶段1最优改进一参数（阶段2用）"""
+#     if not os.path.exists(params_path):
+#         raise FileNotFoundError(f"请先运行阶段1（use_robust_cache=False）生成{params_path}")
+#     with open(params_path, 'r') as f:
+#         return json.load(f)
+
 # ====================== 实验运行+记录+可视化（适配动态调参）======================
+# ====================== 核心函数：运行单次实验（100%复用旧脚本可行逻辑）======================
 def run_experiment(temp_cfg_path):
-    """运行单次实验（复用swan_test2.py逻辑）"""
+    """
+    完全复用旧脚本的实验运行逻辑，无任何修改！
+    配置解析→数据集加载→模型实例化→预测→指标计算，和旧脚本完全一致
+    """
     sys.path.append(DIR_PATH)
+    from parameters import parser
+    from utils import load_args, set_seed
     from dataset import CompositionDataset
     from model.model_factory import get_model
-    from swan_test_hitomcat import predict_logits_text_first_with_hitomcat
+    from swan_test_hitomcat import predict_logits_text_first_with_hitomcat  # 你的改进一函数
 
     try:
-        # 加载临时配置（仅改了2个调参参数）
-        config = load_config(temp_cfg_path)
+        # 1. 配置解析（和旧脚本/ swan_test2.py完全一致）
+        args = parser.parse_args(["--cfg", temp_cfg_path])
+        load_args(args.cfg, args)
+        config = args
+        set_seed(config.seed)
         config.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"  📌 使用设备：{config.device}")
 
-        # 加载数据集+模型（全部从yml读参数）
-        test_dset = CompositionDataset(
-            config.dataset_path, phase='test', split='compositional-split-natural', open_world=config.open_world
+        # 2. 实例化测试数据集（完全对齐旧脚本）
+        print(f"  📌 加载数据集：{config.dataset}")
+        test_dataset = CompositionDataset(
+            config.dataset_path,
+            phase='test',
+            split='compositional-split-natural',
+            open_world=config.open_world
         )
-        allattrs = [a.replace("."," ").lower() for a in test_dset.attrs]
-        allobj = [o.replace("."," ").lower() for o in test_dset.objs]
-        model = get_model(config, attributes=allattrs, classes=allobj, offset=len(allattrs)).to(config.device)
+
+        # 3. 模型加载（完全对齐旧脚本，参数处理一致）
+        print(f"  📌 加载模型：{config.load_model}")
+        allattrs = test_dataset.attrs
+        allobj = test_dataset.objs
+        classes = [cla.replace(".", " ").lower() for cla in allobj]
+        attributes = [attr.replace(".", " ").lower() for attr in allattrs]
+        offset = len(attributes)
+        model = get_model(config, attributes=attributes, classes=classes, offset=offset).to(config.device)
         if config.load_model and os.path.exists(config.load_model):
             model.load_state_dict(torch.load(config.load_model, map_location='cpu'))
         model.eval()
 
-        # 预测+计算指标
+        # 4. 选择预测函数（和旧脚本一致，启用改进一）
+        predict_logits_func = predict_logits_text_first_with_hitomcat
+        print(f"  📌 使用预测函数：Hi-TOMCAT（改进一）")
+
+        # 5. 运行预测（带autocast，对齐旧脚本）
+        print(f"  📌 开始预测...")
         with autocast(dtype=torch.bfloat16):
-            logits, attr_gt, obj_gt, pair_gt = predict_logits_text_first_with_hitomcat(model, test_dset, config)
-        evaluator = Evaluator(test_dset, model, config.device)
-        stats = test(test_dset, evaluator, logits, attr_gt, obj_gt, pair_gt, config)
+            all_logits, all_attr_gt, all_obj_gt, all_pair_gt = predict_logits_func(model, test_dataset, config)
 
-        # 清理临时文件
+        # 6. 计算指标（复用旧脚本的Evaluator+test函数，保证指标一致）
+        print(f"  📌 计算指标...")
+        evaluator = Evaluator(test_dataset, model=None, device=config.device)
+        test_stats = test(test_dataset, evaluator, all_logits, all_attr_gt, all_obj_gt, all_pair_gt, config)
+
+        # 清理临时配置文件
         if os.path.exists(temp_cfg_path):
             os.remove(temp_cfg_path)
-        return {k: stats.get(k, 0.0) for k in CORE_METRICS}
+
+        # 提取核心指标
+        res = {k: test_stats.get(k, 0.0) for k in CORE_METRICS}
+        print(f"  ✅ 实验完成 | AUC: {res['AUC']:.4f} | Best HM: {res['best_hm']:.4f}")
+        return res
+
     except Exception as e:
+        # 失败时清理临时文件
         if os.path.exists(temp_cfg_path):
             os.remove(temp_cfg_path)
-        raise Exception(f"实验失败：{str(e)}")
+        raise Exception(f"运行异常：{str(e)}")
 
+def load_improve1_best_params(params_path):
+    """加载阶段1最优参数，适配阶段2固定需求"""
+    if not os.path.exists(params_path):
+        raise FileNotFoundError(
+            f"请先运行阶段1（yml中use_robust_cache=False）生成最优参数文件！\n缺失文件：{params_path}"
+        )
+    with open(params_path, 'r', encoding='utf-8') as f:
+        best_params = json.load(f)
+    # 兼容旧脚本的参数名，确保能正确读取
+    if "best_lambda_orth" not in best_params or "best_hier_theta" not in best_params:
+        raise KeyError("阶段1最优参数文件缺少核心键：best_lambda_orth / best_hier_theta")
+    return best_params
 def init_record(save_dir, param_names):
     """初始化CSV和SwanLab"""
     os.makedirs(save_dir, exist_ok=True)
@@ -319,24 +414,24 @@ def visualize(save_dir, csv_path, param_names):
     print("="*80)
 
 # ====================== 主函数（自动识别阶段+网格搜索）======================
+
+# ====================== 主函数（自动识别阶段+网格搜索，修复字典访问错误）======================
 def main():
-    # 1. 加载yml配置，自动识别阶段
+    # 1. 加载yml配置（字典），从tta节点读取阶段开关，修复字典访问错误
     original_cfg = load_config(CFG_PATH)
-    use_robust_cache = original_cfg.use_robust_cache
+    # 核心修复：从tta嵌套节点读取use_robust_cache，字典用[]访问，加默认值避免键不存在
+    use_robust_cache = original_cfg.get("tta", {}).get("use_robust_cache", False)
+    
     if not use_robust_cache:
         # STAGE1：仅改进一，调lambda_orth+hier_theta
         tune_params = TUNE_PARAMS_STAGE1
         save_dir = f"{SAVE_DIR_PREFIX}stage1_improve1_only"
-        swanlab_project = "Tune-Stage1-Improve1-Only"
     else:
         # STAGE2：改进一+二，调correction_interval+sim_threshold（固定改进一）
         tune_params = TUNE_PARAMS_STAGE2
         save_dir = f"{SAVE_DIR_PREFIX}stage2_improve1fixed_improve2"
-        swanlab_project = "Tune-Stage2-Improve1Fixed+Improve2"
-        # 加载阶段1最优改进一参数，固定到配置
+        # 提前加载阶段1最优参数（仅打印用，modify_config中会实际设置到配置）
         improve1_best = load_improve1_best_params(tune_params["improve1_best_params_path"])
-        setattr(original_cfg, "lambda_orth", improve1_best["best_lambda_orth"])
-        setattr(original_cfg, "hier_theta", improve1_best["best_hier_theta"])
         print(f"📌 固定改进一最优参数：lambda_orth={improve1_best['best_lambda_orth']:.4f}, hier_theta={improve1_best['best_hier_theta']:.4f}")
 
     # 2. 初始化记录
@@ -359,19 +454,23 @@ def main():
         print(f"【实验 {idx}/{total}】{dict(zip(tune_params['param_names'], param_vals))}")
         print(f"{'='*60}")
         try:
+            # 生成临时配置（modify_config中已处理所有参数设置，包括阶段2固定改进一）
             temp_cfg = modify_config(original_cfg, tune_params, param_vals)
+            # 运行实验
             metrics = run_experiment(temp_cfg)
+            # 记录数据
             record_data(csv_path, tune_params["param_names"], param_vals, metrics)
             success += 1
             print(f"✅ 成功 | AUC: {metrics['AUC']:.4f} | Best HM: {metrics['best_hm']:.4f}")
         except Exception as e:
-            print(f"❌ 失败 | 错误：{str(e)[:100]}...")
+            print(f"❌ 失败 | 错误：{str(e)}...")
             continue
 
     # 4. 可视化+总结
     visualize(save_dir, csv_path, tune_params["param_names"])
     swanlab.finish()
-    print(f"\n📊 总结：共{total}组 | 成功{success}组 | 失败{total-success}组")
-
+    print(f"\n📊 实验总结：共{total}组 | 成功{success}组 | 失败{total-success}组")
+    if success == 0:
+        print("❌ 所有实验失败，请检查：1.yml路径/参数是否正确 2.模型/数据集路径是否有效 3.阶段1最优参数文件是否存在（阶段2）")
 if __name__ == "__main__":
     main()
