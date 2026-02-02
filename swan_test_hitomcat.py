@@ -23,7 +23,7 @@ from parameters import parser
 from dataset import CompositionDataset
 from model.model_factory import get_model
 
-# ====================== 方案一：层级化KAM（逻辑正确+维度兼容） ======================
+# ====================== 方案一：层级化KAM ======================
 class HierarchicalKAM(nn.Module):
     def __init__(self, text_feats, attr_names, obj_names, comp_to_prim, device, lambda1=0.5, lambda2=0.5):
         super(HierarchicalKAM, self).__init__()
@@ -73,9 +73,10 @@ class HierarchicalKAM(nn.Module):
         
         return orth_loss / (num_attr * num_obj)
 
-# ====================== 方案二：稳健记忆库（逻辑正确+空缓存维度兼容） ======================
+# ====================== 方案二：稳健记忆库======================
+
 class RobustPriorityQueue:
-    def __init__(self, shot_capacity, sim_threshold, correction_interval, device, num_total_classes):
+    def __init__(self, shot_capacity, sim_threshold, correction_interval, device, num_total_classes, use_robust_cache):
         self.shot_capacity = shot_capacity
         self.sim_threshold = sim_threshold
         self.correction_interval = correction_interval
@@ -83,6 +84,8 @@ class RobustPriorityQueue:
         self.num_total_classes = num_total_classes  # 总类别数（文本特征数）
         self.cache = defaultdict(list)
         self.step = 0
+        # 新增：改进二启用开关（唯一新增的初始化参数）
+        self.use_robust_cache = use_robust_cache
 
     def cosine_similarity(self, feat1, feat2):
         feat1 = F.normalize(feat1, dim=-1)
@@ -90,6 +93,20 @@ class RobustPriorityQueue:
         return torch.dot(feat1, feat2).item()
 
     def enqueue(self, pred_cls, img_feat, entropy, text_feats):
+        # 核心：关闭改进二时，执行原始Tomcat入队逻辑（无相似度过滤、无step累加）
+        if not self.use_robust_cache:
+            item = (img_feat.detach(), entropy.detach())
+            if pred_cls in self.cache:
+                if len(self.cache[pred_cls]) < self.shot_capacity:
+                    self.cache[pred_cls].append(item)
+                elif entropy < self.cache[pred_cls][-1][1]:
+                    self.cache[pred_cls][-1] = item
+                self.cache[pred_cls] = sorted(self.cache[pred_cls], key=lambda x: x[1])
+            else:
+                self.cache[pred_cls] = [item]
+            return
+        
+        # 开启改进二时，执行原有逻辑（无任何修改）
         self.step += 1
         target_prototype = text_feats[pred_cls]
         sim = self.cosine_similarity(img_feat, target_prototype)
@@ -108,6 +125,11 @@ class RobustPriorityQueue:
             self.cache[pred_cls] = [item]
 
     def periodic_correction(self, model, text_feats):
+        # 关闭改进二时，直接跳过周期性修正（原始Tomcat无此逻辑）
+        if not self.use_robust_cache:
+            return
+        
+        # 开启改进二时，执行原有逻辑（无任何修改）
         if self.step % self.correction_interval != 0:
             return
         
@@ -124,6 +146,7 @@ class RobustPriorityQueue:
     def get_cache_data(self, feat_dim):
         """
         空缓存时返回维度为[0, num_total_classes]的cache_values，避免越界
+        此方法完全未修改，原始/改进二逻辑一致
         """
         cache_keys = []
         cache_values = []
@@ -142,7 +165,7 @@ class RobustPriorityQueue:
             cache_values.append(cls_idx)
             all_classes.append(cls_idx)
         
-        # 核心修复：空缓存时返回维度兼容的空张量
+        # 空缓存时返回维度兼容的空张量
         if len(cache_keys) == 0:
             # cache_keys: [0, feat_dim], cache_values: [0, num_total_classes]
             cache_keys = torch.empty((0, feat_dim), device=self.device)
@@ -157,7 +180,6 @@ class RobustPriorityQueue:
         ).to(cache_keys.dtype)
         
         return cache_keys, cache_values, all_classes
-
 # ====================== 工具函数（核心修复：compute_cache_logits空值处理） ======================
 def contrastive_loss(x: torch.Tensor, y: torch.Tensor, temperature):
     x = F.normalize(x, dim=-1)
@@ -212,7 +234,7 @@ def compute_cache_logits(image_features, cache_keys, cache_values, alpha, beta, 
     cache_logits = ((-1) * (beta - beta * affinity)).exp() @ cache_values
     return alpha * cache_logits.to(device)
 
-# ====================== 核心预测函数（逻辑完整+无越界错误） ======================
+# ====================== 核心预测函数 ======================
 def predict_logits_text_first_with_hitomcat(model, dataset, config):
     model.eval()
     device = config.device
@@ -287,7 +309,8 @@ def predict_logits_text_first_with_hitomcat(model, dataset, config):
             sim_threshold=config.sim_threshold,
             correction_interval=config.correction_interval,
             device=device,
-            num_total_classes=num_total_classes  # 关键：传入总类别数
+            num_total_classes=num_total_classes,  # 关键：传入总类别数
+            use_robust_cache=config.use_robust_cache  # 新增：传入开关
         )
         optimizer_i = torch.optim.AdamW(
             [{'params': hier_kam.parameters(), 'lr': config.image_lr, 'eps': config.eps, 'weight_decay': config.wd}]

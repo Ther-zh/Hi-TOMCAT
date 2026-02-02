@@ -246,7 +246,7 @@ def predict_logits_text_first_with_tomcat(model, dataset, config):
             optimizer_i.step()
 
         # 2. 替换wandb.log为swanlab.log，同时增加配置判断
-        if config.use_wandb:  # 若仍用原参数名use_wandb，改为config.use_wandb
+        if config.use_wandb:  
                 swanlab.log({'loss': loss.item()})
 
 

@@ -39,7 +39,7 @@ test:
   text_encoder_batch_size: 1024
 
   #open world
-  open_world: True
+  open_world: False
   threshold:
   threshold_trials: 50
   bias: 0.001
@@ -70,10 +70,11 @@ tta:
   use_align_loss: True
 
   # 方案一：层级化KAM超参数
-  lambda_orth: 0.001  # 正交损失权重
-  hier_theta: 0.8    # AUW的温度系数
+  lambda_orth: 0.01  # 正交损失权重
+  hier_theta: 1.0   # AUW的温度系数
 
   # 方案二：稳健记忆库超参数
+  use_robust_cache: False
   correction_interval: 20  # 周期性修正间隔
   sim_threshold: 0.20       # 入队相似度阈值（过滤低于sim_threshold的离群点）
 

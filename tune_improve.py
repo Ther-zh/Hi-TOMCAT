@@ -27,14 +27,14 @@ torch.backends.cudnn.benchmark = False
 
 # ====================== 配置项（仅需确认这3个，其余完全对齐swan_test2.py）======================
 CFG_PATH = "config/ut-zappos.yml"  # 你的配置文件路径
-SAVE_DIR = "tune_improve1_results"  # 调参结果保存目录（自动创建）
-SWANLAB_PROJECT = "Tune-Improve1-ClosedWorld"  # SwanLab项目名
-# 改进一核心超参数网格搜索范围（基于你之前的实验，有效范围）
-LAMBDA_ORTH_LIST = [0.001, 0.003, 0.005, 0.01]  # 缩小范围，提升效率
-HIER_THETA_LIST = [0.5, 0.8, 1.0]                # 缩小范围，共12组实验
-# 要记录的核心指标（和swan_test2.py输出完全一致）
+SAVE_DIR = "tune_improve11_results"  # 调参结果保存目录（自动创建）
+SWANLAB_PROJECT = "Tune-Improve11-ClosedWorld"  # SwanLab项目名
+# 改进一核心超参数网格搜索范围
+LAMBDA_ORTH_LIST = [0.0001, 0.0005, 0.0008, 0.001, 0.002, 0.003, 0.005, 0.006, 0.007]
+HIER_THETA_LIST = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
+# 要记录的核心指标
 CORE_METRICS = ["AUC", "best_hm", "attr_acc", "best_seen", "best_unseen", "obj_acc", "biasterm"]
-# 基础参数固化（100%对齐你的实验配置，禁止修改）
+# 基础参数固化
 FIXED_PARAMS = {
     "use_img_cache": False,  # 强制关闭改进二，仅测改进一
     "open_world": False,     # 强制闭世界调参
@@ -45,10 +45,10 @@ FIXED_PARAMS = {
     "seed": SEED,
     "eval_batch_size_wo_tta": 1,  # 对齐swan_test2.py的batch_size参数
     "num_workers": 0,
-    "threshold_trials": 6,   # 闭世界无需调threshold，固定小值
+    "threshold_trials": 6,   # 闭世界无需调threshold，固定小值,若为开世界应设为50
 }
 
-# ====================== 必须定义：对齐swan_test2.py的全局变量/工具类 ======================
+# ====================== 对齐swan_test2.py的全局变量/工具类 ======================
 DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 # 直接从swan_test2.py复制Evaluator类，保证指标计算完全一致
 class Evaluator:

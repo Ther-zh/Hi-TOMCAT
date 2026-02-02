@@ -49,5 +49,6 @@ parser.add_argument('--lambda_orth', type=float, default=0.1, help='Orthogonalit
 parser.add_argument('--theta', type=float, default=1.5, help='Temperature for AUW')
 
 # 方案二：稳健记忆库参数
+parser.add_argument('--use_robust_cache', type=bool, default=False, help='Whether to enable robust cache (Improvement 2)')
 parser.add_argument('--correction_interval', type=int, default=10, help='Periodic correction interval')
 parser.add_argument('--sim_threshold', type=float, default=0.5, help='Similarity threshold for outlier rejection')
