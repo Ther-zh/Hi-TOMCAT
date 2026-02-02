@@ -52,6 +52,113 @@ SAVE_DIR_PREFIX = "tune_results_"  # 结果保存目录前缀（自动加阶段�
 
 # ====================== 对齐swan_test2.py的工具类（无修改）======================
 DIR_PATH = os.path.dirname(os.path.abspath(__file__))
+# class Evaluator:
+#     def __init__(self, dset, model, device):
+#         self.dset = dset
+#         self.device = device
+#         pairs = [(dset.attr2idx[attr], dset.obj2idx[obj]) for attr, obj in dset.pairs]
+#         self.train_pairs = [(dset.attr2idx[attr], dset.obj2idx[obj]) for attr, obj in dset.train_pairs]
+#         self.pairs = torch.LongTensor(pairs)
+
+#         if dset.phase == 'train':
+#             test_pair_set = set(dset.train_pairs)
+#             test_pair_gt = set(dset.train_pairs)
+#         elif dset.phase == 'val':
+#             test_pair_set = set(dset.val_pairs + dset.train_pairs)
+#             test_pair_gt = set(dset.val_pairs)
+#         else:
+#             test_pair_set = set(dset.test_pairs + dset.train_pairs)
+#             test_pair_gt = set(dset.test_pairs)
+
+#         self.test_pair_dict = [(dset.attr2idx[attr], dset.obj2idx[obj]) for attr, obj in test_pair_gt]
+#         self.test_pair_dict = dict.fromkeys(self.test_pair_dict, 0)
+#         for attr, obj in test_pair_gt:
+#             pair_val = dset.pair2idx[(attr, obj)]
+#             key = (dset.attr2idx[attr], dset.obj2idx[obj])
+#             self.test_pair_dict[key] = [pair_val, 0, 0]
+
+#         masks = [1 for _ in dset.pairs] if dset.open_world else [1 if pair in test_pair_set else 0 for pair in dset.pairs]
+#         self.closed_mask = torch.BoolTensor(masks)
+#         seen_mask = [1 if pair in set(dset.train_pairs) else 0 for pair in dset.pairs]
+#         self.seen_mask = torch.BoolTensor(seen_mask)
+
+#         oracle_obj_mask = []
+#         for _obj in dset.objs:
+#             oracle_obj_mask.append(torch.BoolTensor([1 if _obj == obj else 0 for attr, obj in dset.pairs]))
+#         self.oracle_obj_mask = torch.stack(oracle_obj_mask, 0)
+#         self.score_model = self.score_manifold_model
+
+#     def generate_predictions(self, scores, obj_truth, bias=0.0, topk=1):
+#         def get_pred(_s):
+#             _, pred = _s.topk(topk, dim=1)
+#             pred = pred.view(-1)
+#             return self.pairs[pred][:,0].view(-1,topk), self.pairs[pred][:,1].view(-1,topk)
+#         orig = scores.clone()
+#         scores[~self.seen_mask.repeat(scores.shape[0],1)] += bias
+#         return {
+#             "open": get_pred(scores),
+#             "unbiased_open": get_pred(orig),
+#             "closed": get_pred(scores.masked_fill(~self.closed_mask.repeat(scores.shape[0],1), -1e10)),
+#             "unbiased_closed": get_pred(orig.masked_fill(~self.closed_mask.repeat(scores.shape[0],1), -1e10))
+#         }
+
+#     def score_manifold_model(self, scores, obj_truth, bias=0.0, topk=1):
+#         scores = torch.stack([scores[(a,o)] for a,o in self.dset.pairs], 1)
+#         return {**self.generate_predictions(scores, obj_truth, bias, topk), "scores": scores.clone()}
+
+#     def evaluate_predictions(self, preds, attr_gt, obj_gt, pair_gt, allpred, topk=1):
+#         from scipy.stats import hmean
+#         attr_gt, obj_gt, pair_gt = attr_gt.cpu(), obj_gt.cpu(), pair_gt.cpu()
+#         seen_ind = torch.tensor([i for i,(a,o) in enumerate(zip(attr_gt.numpy(), obj_gt.numpy())) if (a,o) in self.train_pairs])
+#         unseen_ind = torch.tensor([i for i,(a,o) in enumerate(zip(attr_gt.numpy(), obj_gt.numpy())) if (a,o) not in self.train_pairs])
+
+#         def process(s):
+#             a_match = (attr_gt.unsqueeze(1).repeat(1,topk) == s[0][:,:topk]).any(1).float()
+#             o_match = (obj_gt.unsqueeze(1).repeat(1,topk) == s[1][:,:topk]).any(1).float()
+#             match = (a_match * o_match).float()
+#             return a_match, o_match, match, match[seen_ind], match[unseen_ind]
+#         stats = {}
+#         for k in ["closed", "unbiased_closed"]:
+#             a,o,m,s,u = process(preds[k])
+#             stats[f"{k}_attr_match"] = a.mean().item()
+#             stats[f"{k}_obj_match"] = o.mean().item()
+#             stats[f"{k}_match"] = m.mean().item()
+#             stats[f"{k}_seen_match"] = s.mean().item() if len(s) else 0.0
+#             stats[f"{k}_unseen_match"] = u.mean().item() if len(u) else 0.0
+
+#         scores = preds["scores"]
+#         correct_scores = scores[torch.arange(len(scores)), pair_gt][unseen_ind]
+#         max_seen = scores[unseen_ind][:, self.seen_mask].topk(topk,1)[0][:,topk-1]
+#         diff = max_seen - correct_scores
+#         valid_diff = diff[stats["closed_unseen_match"]>0] - 1e-4
+#         biaslist = valid_diff[::max(len(valid_diff)//20,1)] if len(valid_diff) else [0.0]
+
+#         seen_acc, unseen_acc = [stats["closed_seen_match"]], [stats["closed_unseen_match"]]
+#         base_scores = torch.stack([allpred[(a,o)] for a,o in self.dset.pairs], 1)
+#         for b in biaslist:
+#             s,u = process(self.score_fast_model(base_scores.clone(), obj_gt, b, topk))[3:]
+#             seen_acc.append(s.mean().item() if len(s) else 0.0)
+#             unseen_acc.append(u.mean().item() if len(u) else 0.0)
+
+#         seen_acc, unseen_acc = np.array(seen_acc), np.array(unseen_acc)
+#         hm = hmean([seen_acc, unseen_acc], axis=0) if len(seen_acc) else 0.0
+#         return {
+#             **stats,
+#             "AUC": np.trapz(seen_acc, unseen_acc),
+#             "best_hm": np.max(hm) if len(hm) else 0.0,
+#             "best_seen": np.max(seen_acc),
+#             "best_unseen": np.max(unseen_acc),
+#             "biasterm": biaslist[np.argmax(hm)] if len(hm) else 1e3
+#         }
+
+#     def score_fast_model(self, scores, obj_truth, bias=0.0, topk=1):
+#         scores[~self.seen_mask.repeat(scores.shape[0],1)] += bias
+#         closed = scores.masked_fill(~self.closed_mask.repeat(scores.shape[0],1), -1e10)
+#         _, pred = closed.topk(topk,1)
+#         pred = pred.view(-1)
+#         return (self.pairs[pred][:,0].view(-1,topk), self.pairs[pred][:,1].view(-1,topk))
+# ====================== 对齐swan_test2.py的工具类（终极修复：解决unseen计算维度展平）======================
+DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 class Evaluator:
     def __init__(self, dset, model, device):
         self.dset = dset
@@ -81,6 +188,9 @@ class Evaluator:
         self.closed_mask = torch.BoolTensor(masks)
         seen_mask = [1 if pair in set(dset.train_pairs) else 0 for pair in dset.pairs]
         self.seen_mask = torch.BoolTensor(seen_mask)
+        # 预计算seen pair的数量（用于维度校验）
+        self.seen_pair_num = self.seen_mask.sum().item()
+        print(f"【Evaluator初始化】seen_mask长度：{len(self.seen_mask)} | seen pair数：{self.seen_pair_num}")
 
         oracle_obj_mask = []
         for _obj in dset.objs:
@@ -104,23 +214,32 @@ class Evaluator:
 
     def score_manifold_model(self, scores, obj_truth, bias=0.0, topk=1):
         scores = torch.stack([scores[(a,o)] for a,o in self.dset.pairs], 1)
+        # 维度校验
+        assert scores.shape == (len(obj_truth), len(self.dset.pairs)), \
+            f"score_manifold_model: scores维度异常 {scores.shape}，预期({len(obj_truth)}, {len(self.dset.pairs)})"
         return {**self.generate_predictions(scores, obj_truth, bias, topk), "scores": scores.clone()}
 
     def evaluate_predictions(self, preds, attr_gt, obj_gt, pair_gt, allpred, topk=1):
         from scipy.stats import hmean
         attr_gt, obj_gt, pair_gt = attr_gt.cpu(), obj_gt.cpu(), pair_gt.cpu()
-        seen_ind = torch.tensor([i for i,(a,o) in enumerate(zip(attr_gt.numpy(), obj_gt.numpy())) if (a,o) in self.train_pairs])
-        unseen_ind = torch.tensor([i for i,(a,o) in enumerate(zip(attr_gt.numpy(), obj_gt.numpy())) if (a,o) not in self.train_pairs])
+        # 优化seen/unseen索引计算，避免循环，提升速度+稳定性
+        pair_comb = torch.stack([attr_gt, obj_gt], dim=1).numpy()
+        train_pair_set = set(tuple(p) for p in self.train_pairs)
+        seen_mask = np.array([tuple(p) in train_pair_set for p in pair_comb])
+        seen_ind = torch.where(torch.BoolTensor(seen_mask))[0]
+        unseen_ind = torch.where(~torch.BoolTensor(seen_mask))[0]
+        self.unseen_num = len(unseen_ind)
+        print(f"【evaluate_predictions】总样本：{len(attr_gt)} | seen样本：{len(seen_ind)} | unseen样本：{self.unseen_num}")
 
         def process(s):
             a_match = (attr_gt.unsqueeze(1).repeat(1,topk) == s[0][:,:topk]).any(1).float()
             o_match = (obj_gt.unsqueeze(1).repeat(1,topk) == s[1][:,:topk]).any(1).float()
             match = (a_match * o_match).float()
-            return a_match, o_match, match, match[seen_ind], match[unseen_ind], torch.ones(512,5), torch.ones(512,5), torch.ones(512,5)
+            return a_match, o_match, match, match[seen_ind], match[unseen_ind]
 
         stats = {}
         for k in ["closed", "unbiased_closed"]:
-            a,o,m,s,u,sc,ss,su = process(preds[k])
+            a,o,m,s,u = process(preds[k])
             stats[f"{k}_attr_match"] = a.mean().item()
             stats[f"{k}_obj_match"] = o.mean().item()
             stats[f"{k}_match"] = m.mean().item()
@@ -128,28 +247,74 @@ class Evaluator:
             stats[f"{k}_unseen_match"] = u.mean().item() if len(u) else 0.0
 
         scores = preds["scores"]
-        correct_scores = scores[torch.arange(len(scores)), pair_gt][unseen_ind]
-        max_seen = scores[unseen_ind][:, self.seen_mask].topk(topk,1)[0][:,topk-1]
-        diff = max_seen - correct_scores
-        valid_diff = diff[stats["closed_unseen_match"]>0] - 1e-4
-        biaslist = valid_diff[::max(len(valid_diff)//20,1)] if len(valid_diff) else [0.0]
+        # ====================== 核心修复：unseen样本scores计算（解决96162维度展平）======================
+        if self.unseen_num == 0:
+            biaslist = [0.0]
+            print("【unseen计算】无unseen样本，跳过bias计算")
+        else:
+            # 1. 计算unseen样本的正确pair得分（维度[1891]，强制一维）
+            correct_scores = scores[torch.arange(len(scores)), pair_gt][unseen_ind].squeeze()
+            # 强制reshape为一维，避免隐性维度问题
+            correct_scores = correct_scores.reshape(-1)
+            print(f"【unseen计算】correct_scores维度：{correct_scores.shape}（预期[{self.unseen_num}]）")
 
+            # 2. 计算unseen样本的seen pair最大得分（核心修复：避免展平，强制一维）
+            # 先索引unseen样本，再取seen mask，得到[1891,33]
+            scores_unseen_seen = scores[unseen_ind][:, self.seen_mask]
+            print(f"【unseen计算】scores_unseen_seen维度：{scores_unseen_seen.shape}（预期[{self.unseen_num},{self.seen_pair_num}]）")
+            # topk取最大值，得到[1891,1]，再squeeze+reshape为[1891]
+            max_seen, _ = scores_unseen_seen.topk(topk, dim=1)
+            max_seen = max_seen.squeeze(dim=1).reshape(-1)
+            print(f"【unseen计算】max_seen维度：{max_seen.shape}（预期[{self.unseen_num}]）")
+
+            # 3. 维度强制校验（核心！确保两个张量都是[1891]）
+            assert correct_scores.shape == max_seen.shape == (self.unseen_num,), \
+                f"维度不匹配：correct_scores{correct_scores.shape} | max_seen{max_seen.shape}，预期均为({self.unseen_num},)"
+
+            # 4. 计算差值，后续操作均基于一维张量
+            diff = max_seen - correct_scores
+            diff = diff.reshape(-1)
+            print(f"【unseen计算】diff维度：{diff.shape}（预期[{self.unseen_num}]）")
+
+            # 5. 过滤有效差值（修复mask广播错误，原代码用标量索引的bug）
+            # 原错误：stats["closed_unseen_match"]是标量，用标量索引会导致广播
+            # 正确：取unseen样本的match结果，生成mask
+            unseen_match = process(preds["closed"])[4]  # 取unseen_ind的match结果
+            valid_mask = (unseen_match > 0).cpu()
+            valid_diff = diff[valid_mask] - 1e-4
+            valid_diff = valid_diff.reshape(-1)
+            print(f"【unseen计算】valid_diff维度：{valid_diff.shape} | 有效样本数：{len(valid_diff)}")
+
+            # 6. 生成biaslist（避免步长导致的维度膨胀）
+            if len(valid_diff) == 0:
+                biaslist = [0.0]
+            else:
+                step = max(len(valid_diff) // 20, 1)
+                biaslist = valid_diff[::step].tolist()
+            print(f"【unseen计算】biaslist长度：{len(biaslist)}")
+
+        # ====================== bias循环计算（修复后）======================
         seen_acc, unseen_acc = [stats["closed_seen_match"]], [stats["closed_unseen_match"]]
         base_scores = torch.stack([allpred[(a,o)] for a,o in self.dset.pairs], 1)
+        # 维度校验
+        assert base_scores.shape == scores.shape, f"base_scores维度异常 {base_scores.shape}，预期{scores.shape}"
+
         for b in biaslist:
-            s,u = process(self.score_fast_model(base_scores.clone(), obj_gt, b, topk))[3:5]
+            # 调用score_fast_model，取seen/unseen准确率
+            s,u = process(self.score_fast_model(base_scores.clone(), obj_gt, b, topk))[3:]
             seen_acc.append(s.mean().item() if len(s) else 0.0)
             unseen_acc.append(u.mean().item() if len(u) else 0.0)
 
         seen_acc, unseen_acc = np.array(seen_acc), np.array(unseen_acc)
-        hm = hmean([seen_acc, unseen_acc], axis=0) if len(seen_acc) else 0.0
+        hm = hmean([seen_acc, unseen_acc], axis=0) if len(seen_acc) and len(unseen_acc) else 0.0
+        # 最终指标返回
         return {
             **stats,
-            "AUC": np.trapz(seen_acc, unseen_acc),
+            "AUC": np.trapz(seen_acc, unseen_acc) if len(seen_acc) > 1 else 0.0,
             "best_hm": np.max(hm) if len(hm) else 0.0,
-            "best_seen": np.max(seen_acc),
-            "best_unseen": np.max(unseen_acc),
-            "biasterm": biaslist[np.argmax(hm)] if len(hm) else 1e3
+            "best_seen": np.max(seen_acc) if len(seen_acc) else 0.0,
+            "best_unseen": np.max(unseen_acc) if len(unseen_acc) else 0.0,
+            "biasterm": biaslist[np.argmax(hm)] if len(hm) and len(biaslist) else 1e3
         }
 
     def score_fast_model(self, scores, obj_truth, bias=0.0, topk=1):
@@ -157,17 +322,35 @@ class Evaluator:
         closed = scores.masked_fill(~self.closed_mask.repeat(scores.shape[0],1), -1e10)
         _, pred = closed.topk(topk,1)
         pred = pred.view(-1)
-        return (self.pairs[pred][:,0].view(-1,topk), self.pairs[pred][:,1].view(-1,topk))
-
+        return (self.pairs[pred][:,0].view(-1, topk), self.pairs[pred][:,1].view(-1, topk))
+# def test(test_dset, evaluator, logits, attr_gt, obj_gt, pair_gt, config):
+#     preds = {p: logits[:,i] for i,p in enumerate(test_dset.pairs)}
+#     all_pred = torch.stack([preds[(a,o)] for a,o in test_dset.pairs], 1)
+#     res = evaluator.score_model(preds, obj_gt, 1e3, 1)
+#     attr_acc = (res['unbiased_closed'][0].squeeze(-1) == attr_gt).float().mean().item()
+#     obj_acc = (res['unbiased_closed'][1].squeeze(-1) == obj_gt).float().mean().item()
+#     stats = evaluator.evaluate_predictions(res, attr_gt, obj_gt, pair_gt, preds, 1)
+#     return {**stats, "attr_acc": attr_acc, "obj_acc": obj_acc}
 def test(test_dset, evaluator, logits, attr_gt, obj_gt, pair_gt, config):
+
     preds = {p: logits[:,i] for i,p in enumerate(test_dset.pairs)}
+    # 🔴 新增：打印preds值的维度（确认每一列维度正确）
+    pred_vals = list(preds.values())
+    
+    # 原代码：构造all_pred张量
     all_pred = torch.stack([preds[(a,o)] for a,o in test_dset.pairs], 1)
+    
+    # 原代码：调用score_model
     res = evaluator.score_model(preds, obj_gt, 1e3, 1)
+
+    
+    # 原代码：计算准确率
     attr_acc = (res['unbiased_closed'][0].squeeze(-1) == attr_gt).float().mean().item()
     obj_acc = (res['unbiased_closed'][1].squeeze(-1) == obj_gt).float().mean().item()
+    
+    # 原代码：评估预测结果
     stats = evaluator.evaluate_predictions(res, attr_gt, obj_gt, pair_gt, preds, 1)
     return {**stats, "attr_acc": attr_acc, "obj_acc": obj_acc}
-
 # ====================== 核心工具函数（适配yml读取+调参逻辑）======================
 # ====================== 工具函数：加载/修改配置（完全对齐旧脚本，适配分阶段调参）======================
 def load_config(cfg_path):
