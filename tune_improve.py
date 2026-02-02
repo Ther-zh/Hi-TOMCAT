@@ -12,11 +12,10 @@ from itertools import product
 from datetime import datetime
 from torch.cuda.amp import autocast
 
-# ====================== 全局配置：解决Linux中文显示+随机种子+环境适配 ======================
+# ====================== 全局配置：仅指定【当前阶段要调的2个参数范围】+ 基础适配 ======================
 plt.switch_backend('Agg')
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans']  # 纯英文，彻底避免字体问题
+plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
-# 固定随机种子，保证实验可复现
 SEED = 42
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
@@ -25,37 +24,38 @@ random.seed(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# ====================== 配置项（仅需确认这3个，其余完全对齐swan_test2.py）======================
-CFG_PATH = "config/ut-zappos.yml"  # 你的配置文件路径
-SAVE_DIR = "tune_improve11_results"  # 调参结果保存目录（自动创建）
-SWANLAB_PROJECT = "Tune-Improve11-ClosedWorld"  # SwanLab项目名
-# 改进一核心超参数网格搜索范围
-LAMBDA_ORTH_LIST = [0.0001, 0.0005, 0.0008, 0.001, 0.002, 0.003, 0.005, 0.006, 0.007]
-HIER_THETA_LIST = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
-# 要记录的核心指标
-CORE_METRICS = ["AUC", "best_hm", "attr_acc", "best_seen", "best_unseen", "obj_acc", "biasterm"]
-# 基础参数固化
-FIXED_PARAMS = {
-    "use_img_cache": False,  # 强制关闭改进二，仅测改进一
-    "open_world": False,     # 强制闭世界调参
-    "shot_capacity": 3,      # 原文最优，固定
-    "text_first": True,      # swan_test2.py中启用的Hi-TOMCAT
-    "use_tta": True,         # 启用TTA，调用你的改进一函数
-    "use_wandb": True,       # 开启SwanLab日志
-    "seed": SEED,
-    "eval_batch_size_wo_tta": 1,  # 对齐swan_test2.py的batch_size参数
-    "num_workers": 0,
-    "threshold_trials": 6,   # 闭世界无需调threshold，固定小值,若为开世界应设为50
+# ---------------------- 仅需修改这里！指定当前要调的2个参数范围 ----------------------
+# 注意：调参范围二选一，根据yml中use_robust_cache开关匹配
+# 1. STAGE1（yml中use_robust_cache=False）：仅改进一，调以下2个参数
+TUNE_PARAMS_STAGE1 = {
+    "param_names": ["lambda_orth", "hier_theta"],
+    "ranges": [
+        [0.0001, 0.0005, 0.0008, 0.001, 0.002, 0.003, 0.005, 0.006, 0.007],  # lambda_orth范围
+        [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]                        # hier_theta范围
+    ]
 }
 
-# ====================== 对齐swan_test2.py的全局变量/工具类 ======================
+# 2. STAGE2（yml中use_robust_cache=True）：改进一+二，调以下2个参数（改进一固定）
+TUNE_PARAMS_STAGE2 = {
+    "param_names": ["correction_interval", "sim_threshold"],
+    "ranges": [
+        [10, 20, 30, 40],                          # correction_interval范围
+        [0.10, 0.15, 0.20, 0.25, 0.30]             # sim_threshold范围
+    ],
+    "improve1_best_params_path": "tune_improve1_only_results/best_params.json"  # 阶段1最优参数路径
+}
+
+# ---------------------- 固定配置（无需修改） ----------------------
+CFG_PATH = "config/ut-zappos.yml"  # 你的yml路径
+CORE_METRICS = ["AUC", "best_hm", "attr_acc", "best_seen", "best_unseen", "obj_acc", "biasterm"]
+SAVE_DIR_PREFIX = "tune_results_"  # 结果保存目录前缀（自动加阶段名）
+
+# ====================== 对齐swan_test2.py的工具类（无修改）======================
 DIR_PATH = os.path.dirname(os.path.abspath(__file__))
-# 直接从swan_test2.py复制Evaluator类，保证指标计算完全一致
 class Evaluator:
     def __init__(self, dset, model, device):
         self.dset = dset
         self.device = device
-
         pairs = [(dset.attr2idx[attr], dset.obj2idx[obj]) for attr, obj in dset.pairs]
         self.train_pairs = [(dset.attr2idx[attr], dset.obj2idx[obj]) for attr, obj in dset.train_pairs]
         self.pairs = torch.LongTensor(pairs)
@@ -72,458 +72,306 @@ class Evaluator:
 
         self.test_pair_dict = [(dset.attr2idx[attr], dset.obj2idx[obj]) for attr, obj in test_pair_gt]
         self.test_pair_dict = dict.fromkeys(self.test_pair_dict, 0)
-
         for attr, obj in test_pair_gt:
             pair_val = dset.pair2idx[(attr, obj)]
             key = (dset.attr2idx[attr], dset.obj2idx[obj])
             self.test_pair_dict[key] = [pair_val, 0, 0]
 
-        if dset.open_world:
-            masks = [1 for _ in dset.pairs]
-        else:
-            masks = [1 if pair in test_pair_set else 0 for pair in dset.pairs]
-
+        masks = [1 for _ in dset.pairs] if dset.open_world else [1 if pair in test_pair_set else 0 for pair in dset.pairs]
         self.closed_mask = torch.BoolTensor(masks)
-        seen_pair_set = set(dset.train_pairs)
-        mask = [1 if pair in seen_pair_set else 0 for pair in dset.pairs]
-        self.seen_mask = torch.BoolTensor(mask)
+        seen_mask = [1 if pair in set(dset.train_pairs) else 0 for pair in dset.pairs]
+        self.seen_mask = torch.BoolTensor(seen_mask)
 
         oracle_obj_mask = []
         for _obj in dset.objs:
-            mask = [1 if _obj == obj else 0 for attr, obj in dset.pairs]
-            oracle_obj_mask.append(torch.BoolTensor(mask))
+            oracle_obj_mask.append(torch.BoolTensor([1 if _obj == obj else 0 for attr, obj in dset.pairs]))
         self.oracle_obj_mask = torch.stack(oracle_obj_mask, 0)
-
         self.score_model = self.score_manifold_model
 
     def generate_predictions(self, scores, obj_truth, bias=0.0, topk=1):
-        def get_pred_from_scores(_scores, topk):
-            _, pair_pred = _scores.topk(topk, dim=1)
-            pair_pred = pair_pred.contiguous().view(-1)
-            attr_pred, obj_pred = self.pairs[pair_pred][:, 0].view(-1, topk), self.pairs[pair_pred][:, 1].view(-1, topk)
-            return (attr_pred, obj_pred)
-
-        results = {}
-        orig_scores = scores.clone()
-        mask = self.seen_mask.repeat(scores.shape[0], 1)
-        scores[~mask] += bias
-
-        results.update({"open": get_pred_from_scores(scores, topk)})
-        results.update({"unbiased_open": get_pred_from_scores(orig_scores, topk)})
-        mask = self.closed_mask.repeat(scores.shape[0], 1)
-        closed_scores = scores.clone()
-        closed_scores[~mask] = -1e10
-        closed_orig_scores = orig_scores.clone()
-        closed_orig_scores[~mask] = -1e10
-        results.update({"closed": get_pred_from_scores(closed_scores, topk)})
-        results.update({"unbiased_closed": get_pred_from_scores(closed_orig_scores, topk)})
-
-        return results
-
-    def score_clf_model(self, scores, obj_truth, topk=1):
-        attr_pred, obj_pred = scores
-        attr_pred, obj_pred, obj_truth = attr_pred.to('cpu'), obj_pred.to('cpu'), obj_truth.to('cpu')
-        attr_subset = attr_pred.index_select(1, self.pairs[:, 0])
-        obj_subset = obj_pred.index_select(1, self.pairs[:, 1])
-        scores = (attr_subset * obj_subset)
-        results = self.generate_predictions(scores, obj_truth)
-        results['biased_scores'] = scores
-        return results
+        def get_pred(_s):
+            _, pred = _s.topk(topk, dim=1)
+            pred = pred.view(-1)
+            return self.pairs[pred][:,0].view(-1,topk), self.pairs[pred][:,1].view(-1,topk)
+        orig = scores.clone()
+        scores[~self.seen_mask.repeat(scores.shape[0],1)] += bias
+        return {
+            "open": get_pred(scores),
+            "unbiased_open": get_pred(orig),
+            "closed": get_pred(scores.masked_fill(~self.closed_mask.repeat(scores.shape[0],1), -1e10)),
+            "unbiased_closed": get_pred(orig.masked_fill(~self.closed_mask.repeat(scores.shape[0],1), -1e10))
+        }
 
     def score_manifold_model(self, scores, obj_truth, bias=0.0, topk=1):
-        scores = {k: v.to('cpu') for k, v in scores.items()}
-        obj_truth = obj_truth.to(self.device)
-        scores = torch.stack([scores[(attr, obj)] for attr, obj in self.dset.pairs], 1)
-        orig_scores = scores.clone()
-        results = self.generate_predictions(scores, obj_truth, bias, topk)
-        results['scores'] = orig_scores
-        return results
+        scores = torch.stack([scores[(a,o)] for a,o in self.dset.pairs], 1)
+        return {**self.generate_predictions(scores, obj_truth, bias, topk), "scores": scores.clone()}
+
+    def evaluate_predictions(self, preds, attr_gt, obj_gt, pair_gt, allpred, topk=1):
+        from scipy.stats import hmean
+        attr_gt, obj_gt, pair_gt = attr_gt.cpu(), obj_gt.cpu(), pair_gt.cpu()
+        seen_ind = torch.tensor([i for i,(a,o) in enumerate(zip(attr_gt.numpy(), obj_gt.numpy())) if (a,o) in self.train_pairs])
+        unseen_ind = torch.tensor([i for i,(a,o) in enumerate(zip(attr_gt.numpy(), obj_gt.numpy())) if (a,o) not in self.train_pairs])
+
+        def process(s):
+            a_match = (attr_gt.unsqueeze(1).repeat(1,topk) == s[0][:,:topk]).any(1).float()
+            o_match = (obj_gt.unsqueeze(1).repeat(1,topk) == s[1][:,:topk]).any(1).float()
+            match = (a_match * o_match).float()
+            return a_match, o_match, match, match[seen_ind], match[unseen_ind], torch.ones(512,5), torch.ones(512,5), torch.ones(512,5)
+
+        stats = {}
+        for k in ["closed", "unbiased_closed"]:
+            a,o,m,s,u,sc,ss,su = process(preds[k])
+            stats[f"{k}_attr_match"] = a.mean().item()
+            stats[f"{k}_obj_match"] = o.mean().item()
+            stats[f"{k}_match"] = m.mean().item()
+            stats[f"{k}_seen_match"] = s.mean().item() if len(s) else 0.0
+            stats[f"{k}_unseen_match"] = u.mean().item() if len(u) else 0.0
+
+        scores = preds["scores"]
+        correct_scores = scores[torch.arange(len(scores)), pair_gt][unseen_ind]
+        max_seen = scores[unseen_ind][:, self.seen_mask].topk(topk,1)[0][:,topk-1]
+        diff = max_seen - correct_scores
+        valid_diff = diff[stats["closed_unseen_match"]>0] - 1e-4
+        biaslist = valid_diff[::max(len(valid_diff)//20,1)] if len(valid_diff) else [0.0]
+
+        seen_acc, unseen_acc = [stats["closed_seen_match"]], [stats["closed_unseen_match"]]
+        base_scores = torch.stack([allpred[(a,o)] for a,o in self.dset.pairs], 1)
+        for b in biaslist:
+            s,u = process(self.score_fast_model(base_scores.clone(), obj_gt, b, topk))[3:5]
+            seen_acc.append(s.mean().item() if len(s) else 0.0)
+            unseen_acc.append(u.mean().item() if len(u) else 0.0)
+
+        seen_acc, unseen_acc = np.array(seen_acc), np.array(unseen_acc)
+        hm = hmean([seen_acc, unseen_acc], axis=0) if len(seen_acc) else 0.0
+        return {
+            **stats,
+            "AUC": np.trapz(seen_acc, unseen_acc),
+            "best_hm": np.max(hm) if len(hm) else 0.0,
+            "best_seen": np.max(seen_acc),
+            "best_unseen": np.max(unseen_acc),
+            "biasterm": biaslist[np.argmax(hm)] if len(hm) else 1e3
+        }
 
     def score_fast_model(self, scores, obj_truth, bias=0.0, topk=1):
-        results = {}
-        mask = self.seen_mask.repeat(scores.shape[0], 1)
-        scores[~mask] += bias
-        mask = self.closed_mask.repeat(scores.shape[0], 1)
-        closed_scores = scores.clone()
-        closed_scores[~mask] = -1e10
-        _, pair_pred = closed_scores.topk(topk, dim=1)
-        pair_pred = pair_pred.contiguous().view(-1)
-        attr_pred, obj_pred = self.pairs[pair_pred][:, 0].view(-1, topk), self.pairs[pair_pred][:, 1].view(-1, topk)
-        results.update({'closed': (attr_pred, obj_pred)})
-        return results
+        scores[~self.seen_mask.repeat(scores.shape[0],1)] += bias
+        closed = scores.masked_fill(~self.closed_mask.repeat(scores.shape[0],1), -1e10)
+        _, pred = closed.topk(topk,1)
+        pred = pred.view(-1)
+        return (self.pairs[pred][:,0].view(-1,topk), self.pairs[pred][:,1].view(-1,topk))
 
-    def evaluate_predictions(self, predictions, attr_truth, obj_truth, pair_truth, allpred, topk=1):
-        from scipy.stats import hmean
-        attr_truth, obj_truth, pair_truth = attr_truth.to("cpu"), obj_truth.to("cpu"), pair_truth.to("cpu")
-        pairs = list(zip(list(attr_truth.numpy()), list(obj_truth.numpy())))
-        seen_ind, unseen_ind = [], []
-        for i in range(len(attr_truth)):
-            if pairs[i] in self.train_pairs:
-                seen_ind.append(i)
-            else:
-                unseen_ind.append(i)
-        seen_ind, unseen_ind = torch.LongTensor(seen_ind), torch.LongTensor(unseen_ind)
+def test(test_dset, evaluator, logits, attr_gt, obj_gt, pair_gt, config):
+    preds = {p: logits[:,i] for i,p in enumerate(test_dset.pairs)}
+    all_pred = torch.stack([preds[(a,o)] for a,o in test_dset.pairs], 1)
+    res = evaluator.score_model(preds, obj_gt, 1e3, 1)
+    attr_acc = (res['unbiased_closed'][0].squeeze(-1) == attr_gt).float().mean().item()
+    obj_acc = (res['unbiased_closed'][1].squeeze(-1) == obj_gt).float().mean().item()
+    stats = evaluator.evaluate_predictions(res, attr_gt, obj_gt, pair_gt, preds, 1)
+    return {**stats, "attr_acc": attr_acc, "obj_acc": obj_acc}
 
-        def _process(_scores):
-            attr_match = (attr_truth.unsqueeze(1).repeat(1, topk) == _scores[0][:, :topk])
-            obj_match = (obj_truth.unsqueeze(1).repeat(1, topk) == _scores[1][:, :topk])
-            match = (attr_match * obj_match).any(1).float()
-            attr_match = attr_match.any(1).float()
-            obj_match = obj_match.any(1).float()
-            seen_match = match[seen_ind]
-            unseen_match = match[unseen_ind]
-            seen_score, unseen_score = torch.ones(512, 5), torch.ones(512, 5)
-            return attr_match, obj_match, match, seen_match, unseen_match, torch.Tensor(seen_score + unseen_score), torch.Tensor(seen_score), torch.Tensor(unseen_score)
-
-        def _add_to_dict(_scores, type_name, stats):
-            base = ["_attr_match", "_obj_match", "_match", "_seen_match", "_unseen_match", "_ca", "_seen_ca", "_unseen_ca"]
-            for val, name in zip(_scores, base):
-                stats[type_name + name] = val
-
-        stats = dict()
-        closed_scores = _process(predictions["closed"])
-        unbiased_closed = _process(predictions["unbiased_closed"])
-        _add_to_dict(closed_scores, "closed", stats)
-        _add_to_dict(unbiased_closed, "closed_ub", stats)
-
-        scores = predictions["scores"]
-        correct_scores = scores[torch.arange(scores.shape[0]), pair_truth][unseen_ind]
-        max_seen_scores = predictions['scores'][unseen_ind][:, self.seen_mask].topk(topk, dim=1)[0][:, topk - 1]
-        unseen_score_diff = max_seen_scores - correct_scores
-        unseen_matches = stats["closed_unseen_match"].bool()
-        correct_unseen_score_diff = unseen_score_diff[unseen_matches] - 1e-4
-        correct_unseen_score_diff = torch.sort(correct_unseen_score_diff)[0]
-        magic_binsize = 20
-        bias_skip = max(len(correct_unseen_score_diff) // magic_binsize, 1)
-        biaslist = correct_unseen_score_diff[::bias_skip]
-
-        seen_match_max = float(stats["closed_seen_match"].mean())
-        unseen_match_max = float(stats["closed_unseen_match"].mean())
-        seen_accuracy, unseen_accuracy = [], []
-
-        base_scores = {k: v.to("cpu") for k, v in allpred.items()}
-        obj_truth = obj_truth.to("cpu")
-        base_scores = torch.stack([allpred[(attr, obj)] for attr, obj in self.dset.pairs], 1)
-
-        for bias in biaslist:
-            scores = base_scores.clone()
-            results = self.score_fast_model(scores, obj_truth, bias=bias, topk=topk)
-            results = results['closed']
-            results = _process(results)
-            seen_match = float(results[3].mean())
-            unseen_match = float(results[4].mean())
-            seen_accuracy.append(seen_match)
-            unseen_accuracy.append(unseen_match)
-
-        seen_accuracy.append(seen_match_max)
-        unseen_accuracy.append(unseen_match_max)
-        seen_accuracy, unseen_accuracy = np.array(seen_accuracy), np.array(unseen_accuracy)
-        area = np.trapz(seen_accuracy, unseen_accuracy)
-
-        for key in stats:
-            stats[key] = float(stats[key].mean())
-
-        try:
-            harmonic_mean = hmean([seen_accuracy, unseen_accuracy], axis=0)
-        except BaseException:
-            harmonic_mean = 0
-
-        max_hm = np.max(harmonic_mean)
-        idx = np.argmax(harmonic_mean)
-        if idx == len(biaslist):
-            bias_term = 1e3
-        else:
-            bias_term = biaslist[idx]
-        stats["biasterm"] = float(bias_term)
-        stats["best_unseen"] = np.max(unseen_accuracy)
-        stats["best_seen"] = np.max(seen_accuracy)
-        stats["AUC"] = area
-        stats["hm_unseen"] = unseen_accuracy[idx]
-        stats["hm_seen"] = seen_accuracy[idx]
-        stats["best_hm"] = max_hm
-        return stats
-
-# 从swan_test2.py复制test函数，保证指标计算一致
-def test(test_dataset, evaluator, all_logits, all_attr_gt, all_obj_gt, all_pair_gt, config):
-    predictions = {pair_name: all_logits[:, i] for i, pair_name in enumerate(test_dataset.pairs)}
-    all_pred = [predictions]
-    all_pred_dict = {}
-    for k in all_pred[0].keys():
-        all_pred_dict[k] = torch.cat([all_pred[i][k] for i in range(len(all_pred))]).float()
-    results = evaluator.score_model(all_pred_dict, all_obj_gt, bias=1e3, topk=1)
-    attr_acc = float(torch.mean((results['unbiased_closed'][0].squeeze(-1) == all_attr_gt).float()))
-    obj_acc = float(torch.mean((results['unbiased_closed'][1].squeeze(-1) == all_obj_gt).float()))
-    stats = evaluator.evaluate_predictions(results, all_attr_gt, all_obj_gt, all_pair_gt, all_pred_dict, topk=1)
-    stats['attr_acc'] = attr_acc
-    stats['obj_acc'] = obj_acc
-    return stats
-
-# ====================== 工具函数：加载/修改配置（兼容swan_test2.py的yml格式）======================
+# ====================== 核心工具函数（适配yml读取+调参逻辑）======================
 def load_config(cfg_path):
+    """加载yml配置，返回Namespace对象（和swan_test2.py一致）"""
     import yaml
-    with open(cfg_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
+    from parameters import parser
+    args = parser.parse_args(["--cfg", cfg_path])
+    from utils import load_args
+    load_args(args.cfg, args)
+    return args
 
-def save_config(config, save_path):
+def load_improve1_best_params(params_path):
+    """加载阶段1最优改进一参数（阶段2用）"""
+    if not os.path.exists(params_path):
+        raise FileNotFoundError(f"请先运行阶段1（use_robust_cache=False）生成{params_path}")
+    with open(params_path, 'r') as f:
+        return json.load(f)
+
+def modify_config(original_cfg, tune_params, param_values):
+    """
+    动态修改配置：仅覆盖当前要调的2个参数，其余保留yml值
+    original_cfg: 从yml加载的原始配置
+    tune_params: 当前阶段的调参配置（param_names + ranges）
+    param_values: 本次实验的2个参数值
+    """
+    cfg = copy.deepcopy(original_cfg)
+    # 仅覆盖要调的2个参数
+    for param_name, param_val in zip(tune_params["param_names"], param_values):
+        setattr(cfg, param_name, param_val)
+    # 生成临时配置文件（基于原始yml修改，仅改2个参数）
+    temp_cfg_path = f"temp_tune_{'_'.join([str(v) for v in param_values])}.yml"
     import yaml
-    with open(save_path, 'w', encoding='utf-8') as f:
-        yaml.dump(config, f, sort_keys=False)
-
-def modify_config(original_cfg, lambda_orth, hier_theta):
-    """动态修改配置：仅更新改进一的超参数，其余完全保留"""
-    cfg = original_cfg.copy()
-    # 改进一核心超参数写入tta节点（无则创建）
-    if "tta" not in cfg:
-        cfg["tta"] = {}
-    cfg["tta"]["lambda_orth"] = lambda_orth
-    cfg["tta"]["hier_theta"] = hier_theta
-    # 固化基础参数到对应分组
-    # 确保test分组存在
-    if "test" not in cfg:
-        cfg["test"] = {}
-    # 确保tta分组存在
-    if "tta" not in cfg:
-        cfg["tta"] = {}
-    # 分配参数到对应分组
-    test_params = ["open_world", "text_first", "use_wandb", "seed", "eval_batch_size_wo_tta", "num_workers", "threshold_trials"]
-    tta_params = ["use_img_cache", "shot_capacity", "use_tta"]
-    
-    for k, v in FIXED_PARAMS.items():
-        if k in test_params:
-            cfg["test"][k] = v
-        elif k in tta_params:
-            cfg["tta"][k] = v
-    # 保存临时配置文件（避免覆盖原配置）
-    temp_cfg_path = f"temp_improve1_{lambda_orth:.4f}_{hier_theta:.1f}.yml"
-    save_config(cfg, temp_cfg_path)
+    with open(temp_cfg_path, 'w') as f:
+        yaml.dump(vars(cfg), f, sort_keys=False)
     return temp_cfg_path
 
-# ====================== 核心函数：运行单次实验（100%对齐swan_test2.py的运行逻辑）======================
+# ====================== 实验运行+记录+可视化（适配动态调参）======================
 def run_experiment(temp_cfg_path):
-    """
-    完全复用swan_test2.py的运行逻辑：
-    配置解析→数据集实例化→模型加载→预测→指标计算
-    """
-    # 添加入口目录，保证导入所有模块
+    """运行单次实验（复用swan_test2.py逻辑）"""
     sys.path.append(DIR_PATH)
-    from parameters import parser
-    from utils import load_args, set_seed
     from dataset import CompositionDataset
     from model.model_factory import get_model
-    from swan_test_hitomcat import predict_logits_text_first_with_hitomcat  # 你的改进一函数
+    from swan_test_hitomcat import predict_logits_text_first_with_hitomcat
 
     try:
-        # 1. 配置解析（和swan_test2.py完全一致）
-        args = parser.parse_args(["--cfg", temp_cfg_path])
-        load_args(args.cfg, args)
-        config = args
-        set_seed(config.seed)
+        # 加载临时配置（仅改了2个调参参数）
+        config = load_config(temp_cfg_path)
         config.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"  📌 使用设备：{config.device}")
 
-        # 2. 实例化测试数据集（无get_dataset，直接用CompositionDataset，对齐swan_test2.py）
-        print(f"  📌 加载数据集：{config.dataset}")
-        test_dataset = CompositionDataset(
-            config.dataset_path,
-            phase='test',
-            split='compositional-split-natural',
-            open_world=config.open_world
+        # 加载数据集+模型（全部从yml读参数）
+        test_dset = CompositionDataset(
+            config.dataset_path, phase='test', split='compositional-split-natural', open_world=config.open_world
         )
-
-        # 3. 模型加载（对齐swan_test2.py，需要attributes/classes/offset参数）
-        print(f"  📌 加载模型：{config.load_model}")
-        allattrs = test_dataset.attrs
-        allobj = test_dataset.objs
-        classes = [cla.replace(".", " ").lower() for cla in allobj]
-        attributes = [attr.replace(".", " ").lower() for attr in allattrs]
-        offset = len(attributes)
-        # 实例化模型并加载权重
-        model = get_model(config, attributes=attributes, classes=classes, offset=offset).to(config.device)
+        allattrs = [a.replace("."," ").lower() for a in test_dset.attrs]
+        allobj = [o.replace("."," ").lower() for o in test_dset.objs]
+        model = get_model(config, attributes=allattrs, classes=allobj, offset=len(allattrs)).to(config.device)
         if config.load_model and os.path.exists(config.load_model):
             model.load_state_dict(torch.load(config.load_model, map_location='cpu'))
         model.eval()
 
-        # 4. 选择预测函数（和swan_test2.py完全一致，启用改进一）
-        predict_logits_func = predict_logits_text_first_with_hitomcat
-        print(f"  📌 使用预测函数：Hi-TOMCAT（改进一）")
-
-        # 5. 运行预测（带autocast，对齐swan_test2.py）
-        print(f"  📌 开始预测...")
+        # 预测+计算指标
         with autocast(dtype=torch.bfloat16):
-            all_logits, all_attr_gt, all_obj_gt, all_pair_gt = predict_logits_func(model, test_dataset, config)
+            logits, attr_gt, obj_gt, pair_gt = predict_logits_text_first_with_hitomcat(model, test_dset, config)
+        evaluator = Evaluator(test_dset, model, config.device)
+        stats = test(test_dset, evaluator, logits, attr_gt, obj_gt, pair_gt, config)
 
-        # 6. 计算指标（复用swan_test2.py的Evaluator+test函数）
-        print(f"  📌 计算指标...")
-        evaluator = Evaluator(test_dataset, model=None, device=config.device)
-        test_stats = test(test_dataset, evaluator, all_logits, all_attr_gt, all_obj_gt, all_pair_gt, config)
-
-        # 清理临时配置文件
+        # 清理临时文件
         if os.path.exists(temp_cfg_path):
             os.remove(temp_cfg_path)
-
-        # 提取核心指标，保证无缺失
-        res = {k: test_stats.get(k, 0.0) for k in CORE_METRICS}
-        print(f"  ✅ 实验完成 | AUC: {res['AUC']:.4f} | Best HM: {res['best_hm']:.4f}")
-        return res
-
+        return {k: stats.get(k, 0.0) for k in CORE_METRICS}
     except Exception as e:
-        # 实验失败时清理临时文件
         if os.path.exists(temp_cfg_path):
             os.remove(temp_cfg_path)
-        raise Exception(f"运行异常：{str(e)}")
+        raise Exception(f"实验失败：{str(e)}")
 
-# ====================== 工具函数：数据记录（CSV+SwanLab）======================
-def init_swanlab(project_name):
-    """初始化SwanLab，仅记录关键配置"""
-    swanlab.init(
-        project=project_name,
-        config=FIXED_PARAMS,
-        log_level="info",
-        mode="online" if FIXED_PARAMS["use_wandb"] else "offline"
-    )
-
-def init_csv(save_dir, core_metrics):
-    """初始化CSV文件，写入表头"""
+def init_record(save_dir, param_names):
+    """初始化CSV和SwanLab"""
     os.makedirs(save_dir, exist_ok=True)
-    csv_path = os.path.join(save_dir, "tune_improve1_metrics.csv")
-    headers = ["lambda_orth", "hier_theta"] + core_metrics
-    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        writer.writeheader()
+    csv_path = os.path.join(save_dir, "tune_metrics.csv")
+    headers = param_names + CORE_METRICS
+    with open(csv_path, 'w', newline='') as f:
+        csv.DictWriter(f, fieldnames=headers).writeheader()
+    # SwanLab项目名=保存目录名
+    swanlab.init(project=os.path.basename(save_dir), config={"tune_params": param_names})
     return csv_path
 
-def record_data(csv_path, lambda_orth, hier_theta, metrics):
-    """记录单次实验数据到CSV+SwanLab"""
-    row = {"lambda_orth": lambda_orth, "hier_theta": hier_theta}
+def record_data(csv_path, param_names, param_values, metrics):
+    """记录数据到CSV+SwanLab"""
+    row = dict(zip(param_names, param_values))
     row.update(metrics)
-    # 写入CSV
-    with open(csv_path, 'a+', encoding='utf-8', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        writer.writerow(row)
-    # 同步到SwanLab
-    swanlab.log({**metrics, "lambda_orth": lambda_orth, "hier_theta": hier_theta})
+    with open(csv_path, 'a+', newline='') as f:
+        csv.DictWriter(f, fieldnames=row.keys()).writerow(row)
+    swanlab.log({**metrics, **dict(zip(param_names, param_values))})
 
-# ====================== 工具函数：可视化结果（鲁棒性强，无数据不报错）======================
-def visualize_results(save_dir, csv_path, core_metrics):
+def visualize(save_dir, csv_path, param_names):
+    """可视化调参结果"""
     import pandas as pd
-    # 加载并过滤有效数据
-    df = pd.read_csv(csv_path)
-    df = df.dropna(subset=["AUC"])
-    df = df[df["AUC"] > 0]
+    df = pd.read_csv(csv_path).dropna(subset=["AUC"]).query("AUC>0")
     if len(df) == 0:
-        print("【警告】无有效实验数据，跳过可视化！")
+        print("无有效数据，跳过可视化")
         return
 
-    # 1. AUC热力图（核心，找最优参数）
-    plt.figure(figsize=(10, 8))
-    auc_pivot = df.pivot(index="lambda_orth", columns="hier_theta", values="AUC")
-    if not auc_pivot.empty:
-        im = plt.imshow(auc_pivot, cmap="YlGnBu", aspect="auto")
-        # 添加数值标注
-        for i in range(len(auc_pivot.index)):
-            for j in range(len(auc_pivot.columns)):
-                val = auc_pivot.iloc[i, j]
-                plt.text(j, i, f"{val:.4f}", ha="center", va="center", color="black", fontsize=10)
-        plt.colorbar(im, label="AUC")
-    # 坐标轴设置（纯英文）
-    plt.xticks(range(len(auc_pivot.columns)), auc_pivot.columns, fontsize=12)
-    plt.yticks(range(len(auc_pivot.index)), auc_pivot.index, fontsize=12)
-    plt.xlabel("hier_theta (AUW Temperature Coefficient)", fontsize=14, fontweight="bold")
-    plt.ylabel("lambda_orth (Orthogonal Loss Weight)", fontsize=14, fontweight="bold")
-    plt.title("Improve1-ClosedWorld: AUC Heatmap (Higher is Better)", fontsize=16, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "auc_heatmap.png"), dpi=300, bbox_inches="tight")
-    plt.close()
+    # 热力图（AUC）
+    for value in ["AUC", "best_hm", "attr_acc"]:
+        plt.figure(figsize=(10,8))
+        pivot = df.pivot(index=param_names[0], columns=param_names[1], values=value)
+        im = plt.imshow(pivot, cmap="YlGnBu", aspect="auto")
+        for i in range(len(pivot.index)):
+            for j in range(len(pivot.columns)):
+                plt.text(j, i, f"{pivot.iloc[i,j]:.4f}", ha="center", va="center", fontsize=10)
+        plt.colorbar(im, label=value)
+        plt.xlabel(param_names[1], fontsize=14, fontweight="bold")
+        plt.ylabel(param_names[0], fontsize=14, fontweight="bold")
+        plt.title(f"{value} Heatmap (Higher is Better)", fontsize=16, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, f"{value}_heatmap.png"), dpi=300)
+        plt.close()
 
-    # 2. 核心指标折线图（AUC/best_hm/attr_acc）
+    # 折线图（核心指标）
     for metric in ["AUC", "best_hm", "attr_acc"]:
-        plt.figure(figsize=(12, 6))
-        for theta in HIER_THETA_LIST:
-            theta_data = df[df["hier_theta"] == theta].sort_values("lambda_orth")
-            if len(theta_data) == 0:
-                continue
-            plt.plot(theta_data["lambda_orth"], theta_data[metric], marker="o", linewidth=2, label=f"hier_theta={theta}")
-        plt.xlabel("lambda_orth (Orthogonal Loss Weight)", fontsize=14, fontweight="bold")
+        plt.figure(figsize=(12,6))
+        for p2 in df[param_names[1]].unique():
+            data = df[df[param_names[1]] == p2].sort_values(param_names[0])
+            plt.plot(data[param_names[0]], data[metric], marker="o", linewidth=2, label=f"{param_names[1]}={p2}")
+        plt.xlabel(param_names[0], fontsize=14, fontweight="bold")
         plt.ylabel(metric, fontsize=14, fontweight="bold")
-        plt.title(f"Improve1-ClosedWorld: {metric} vs lambda_orth", fontsize=16, fontweight="bold")
-        plt.legend(loc="best", fontsize=12)
-        plt.grid(True, alpha=0.3)
+        plt.title(f"{metric} vs {param_names[0]}", fontsize=16, fontweight="bold")
+        plt.legend()
+        plt.grid(alpha=0.3)
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, f"{metric}_lineplot.png"), dpi=300)
         plt.close()
 
-    # 3. 保存最优参数（按AUC最大化）
-    best_idx = df["AUC"].idxmax()
-    best_row = df.loc[best_idx]
-    best_params = {
-        "best_lambda_orth": float(best_row["lambda_orth"]),
-        "best_hier_theta": float(best_row["hier_theta"]),
-        "best_AUC": float(best_row["AUC"]),
-        "best_hm": float(best_row["best_hm"]),
-        "attr_acc": float(best_row["attr_acc"]),
-        "best_seen": float(best_row["best_seen"]),
-        "best_unseen": float(best_row["best_unseen"]),
-        "obj_acc": float(best_row["obj_acc"]),
-        "biasterm": float(best_row["biasterm"])
-    }
-    # 保存到JSON+Excel
-    with open(os.path.join(save_dir, "best_params.json"), 'w', encoding='utf-8') as f:
+    # 保存最优参数
+    best_row = df.loc[df["AUC"].idxmax()]
+    best_params = {**dict(zip(param_names, best_row[param_names])), **best_row[CORE_METRICS].to_dict()}
+    with open(os.path.join(save_dir, "best_params.json"), 'w') as f:
         json.dump(best_params, f, indent=4)
-    df.to_excel(os.path.join(save_dir, "tune_improve1_metrics.xlsx"), index=False)
 
-    # 打印最优参数（醒目显示）
+    # 打印结果
     print("="*80)
-    print("✅ 改进一（层级化KAM）闭世界调参完成！最优参数如下：")
-    for k, v in best_params.items():
-        if "lambda" in k or "theta" in k:
-            print(f"📌 {k}: {v:.4f}")
-        elif k in ["best_AUC", "best_hm"]:
+    print(f"✅ 调参完成！最优参数：")
+    for k,v in best_params.items():
+        if k in param_names:
+            print(f"📌 {k}: {v:.4f}" if isinstance(v, float) else f"📌 {k}: {v}")
+        elif k in ["AUC", "best_hm"]:
             print(f"📊 {k}: {v:.4f}")
         else:
             print(f"📊 {k}: {v:.2%}")
     print("="*80)
-    print(f"📁 所有结果已保存至：{os.path.abspath(save_dir)}")
 
-# ====================== 主函数：网格搜索主流程 ======================
+# ====================== 主函数（自动识别阶段+网格搜索）======================
 def main():
-    print("="*80)
-    print("🚀 开始改进一（层级化KAM）闭世界超参数网格搜索")
-    print(f"📌 搜索参数：lambda_orth={LAMBDA_ORTH_LIST}, hier_theta={HIER_THETA_LIST}")
-    print(f"📌 总实验组数：{len(LAMBDA_ORTH_LIST) * len(HIER_THETA_LIST)}")
-    print("="*80)
-
-    # 初始化
+    # 1. 加载yml配置，自动识别阶段
     original_cfg = load_config(CFG_PATH)
-    csv_path = init_csv(SAVE_DIR, CORE_METRICS)
-    init_swanlab(SWANLAB_PROJECT)
+    use_robust_cache = original_cfg.use_robust_cache
+    if not use_robust_cache:
+        # STAGE1：仅改进一，调lambda_orth+hier_theta
+        tune_params = TUNE_PARAMS_STAGE1
+        save_dir = f"{SAVE_DIR_PREFIX}stage1_improve1_only"
+        swanlab_project = "Tune-Stage1-Improve1-Only"
+    else:
+        # STAGE2：改进一+二，调correction_interval+sim_threshold（固定改进一）
+        tune_params = TUNE_PARAMS_STAGE2
+        save_dir = f"{SAVE_DIR_PREFIX}stage2_improve1fixed_improve2"
+        swanlab_project = "Tune-Stage2-Improve1Fixed+Improve2"
+        # 加载阶段1最优改进一参数，固定到配置
+        improve1_best = load_improve1_best_params(tune_params["improve1_best_params_path"])
+        setattr(original_cfg, "lambda_orth", improve1_best["best_lambda_orth"])
+        setattr(original_cfg, "hier_theta", improve1_best["best_hier_theta"])
+        print(f"📌 固定改进一最优参数：lambda_orth={improve1_best['best_lambda_orth']:.4f}, hier_theta={improve1_best['best_hier_theta']:.4f}")
 
-    # 网格搜索
-    param_combinations = product(LAMBDA_ORTH_LIST, HIER_THETA_LIST)
-    total_num = len(LAMBDA_ORTH_LIST) * len(HIER_THETA_LIST)
-    success_num = 0
+    # 2. 初始化记录
+    csv_path = init_record(save_dir, tune_params["param_names"])
+    print("="*80)
+    print(f"🚀 开始调参（阶段：{'仅改进一' if not use_robust_cache else '改进一+二'}）")
+    print(f"📌 调参参数：{tune_params['param_names']}")
+    print(f"📌 参数范围：{tune_params['ranges']}")
+    print(f"📌 总实验组数：{len(tune_params['ranges'][0]) * len(tune_params['ranges'][1])}")
+    print(f"📌 结果保存至：{save_dir}")
+    print("="*80)
 
-    for idx, (lambda_orth, hier_theta) in enumerate(param_combinations, 1):
+    # 3. 网格搜索
+    param_combinations = product(*tune_params["ranges"])
+    total = len(tune_params['ranges'][0]) * len(tune_params['ranges'][1])
+    success = 0
+
+    for idx, param_vals in enumerate(param_combinations, 1):
         print(f"\n{'='*60}")
-        print(f"【实验 {idx}/{total_num}】lambda_orth={lambda_orth:.4f}, hier_theta={hier_theta:.1f}")
+        print(f"【实验 {idx}/{total}】{dict(zip(tune_params['param_names'], param_vals))}")
         print(f"{'='*60}")
         try:
-            # 生成临时配置+运行实验
-            temp_cfg_path = modify_config(original_cfg, lambda_orth, hier_theta)
-            metrics = run_experiment(temp_cfg_path)
-            # 记录数据
-            record_data(csv_path, lambda_orth, hier_theta, metrics)
-            success_num += 1
+            temp_cfg = modify_config(original_cfg, tune_params, param_vals)
+            metrics = run_experiment(temp_cfg)
+            record_data(csv_path, tune_params["param_names"], param_vals, metrics)
+            success += 1
+            print(f"✅ 成功 | AUC: {metrics['AUC']:.4f} | Best HM: {metrics['best_hm']:.4f}")
         except Exception as e:
-            print(f"❌ 实验失败 | 错误详情：{e}")
+            print(f"❌ 失败 | 错误：{str(e)[:100]}...")
             continue
 
-    # 可视化+总结
-    visualize_results(SAVE_DIR, csv_path, CORE_METRICS)
+    # 4. 可视化+总结
+    visualize(save_dir, csv_path, tune_params["param_names"])
     swanlab.finish()
-    print(f"\n📊 实验总结：共{total_num}组 | 成功{success_num}组 | 失败{total_num-success_num}组")
-    if success_num == 0:
-        print("❌ 所有实验失败，请检查配置文件中的【dataset_path/load_model】路径是否正确！")
+    print(f"\n📊 总结：共{total}组 | 成功{success}组 | 失败{total-success}组")
 
 if __name__ == "__main__":
     main()
