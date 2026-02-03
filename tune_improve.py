@@ -32,8 +32,8 @@ SWANLAB_PROJECT = "Tune-Improve-Final"  # SwanLab项目名
 # 调参参数范围：按场景预留，脚本会根据YML中的use_robust_cache自动匹配
 TUNE_PARAMS_SCOPE = {
     # 场景1：YML中use_robust_cache=False（仅改进一）→ 调这两个
-    "lambda_orth": [0.001, 0.003, 0.005, 0.01],  # 正交损失权重
-    "hier_theta": [0.5, 0.8, 1.0],               # 自适应更新温度系数
+    "lambda_orth": [2,3,4,5,6,7,8,9,10],  # 正交损失权重
+    "hier_theta": [1.3,1.6],               # 自适应更新温度系数
     # 场景2：YML中use_robust_cache=True（改进一+二）→ 调这两个
     "sim_threshold": [0.2, 0.25, 0.3],           # 缓存入队相似度阈值
     "correction_interval": [10, 20, 30]          # 缓存周期性修正步长
@@ -434,6 +434,8 @@ def record_data(csv_path, param1_val, param2_val, metrics):
 # ====================== 可视化工具：自适应调参参数，鲁棒性强 ======================
 def visualize_results(save_dir, csv_path, core_metrics):
     import pandas as pd
+    import json
+    import matplotlib.pyplot as plt
     # 加载并过滤有效数据（剔除AUC<=0/空值的无效实验）
     df = pd.read_csv(csv_path)
     df = df.dropna(subset=["AUC"])
@@ -445,23 +447,26 @@ def visualize_results(save_dir, csv_path, core_metrics):
     # 场景后缀，用于文件名
     csv_suffix = "robustcache_on" if use_robust_cache else "robustcache_off"
 
-    
-     # 热力图
+    # 1. 多指标热力图（AUC/best_hm/attr_acc），修复param_names未定义问题
     for value in ["AUC", "best_hm", "attr_acc"]:
         plt.figure(figsize=(10,8))
-        pivot = df.pivot(index=param_names[0], columns=param_names[1], values=value)
+        # 核心修复：用全局TUNE_PARAM1/TUNE_PARAM2替换未定义的param_names
+        pivot = df.pivot(index=TUNE_PARAM1, columns=TUNE_PARAM2, values=value)
         im = plt.imshow(pivot, cmap="YlGnBu", aspect="auto")
+        # 数值标注，保留4位小数
         for i in range(len(pivot.index)):
             for j in range(len(pivot.columns)):
                 plt.text(j, i, f"{pivot.iloc[i,j]:.4f}", ha="center", va="center", fontsize=10)
         plt.colorbar(im, label=value)
-        plt.xlabel(param_names[1], fontsize=14, fontweight="bold")
-        plt.ylabel(param_names[0], fontsize=14, fontweight="bold")
+        # 修复：图表轴标签替换为实际调参参数名
+        plt.xlabel(TUNE_PARAM2, fontsize=14, fontweight="bold")
+        plt.ylabel(TUNE_PARAM1, fontsize=14, fontweight="bold")
         plt.title(f"{value} Heatmap (Higher is Better)", fontsize=16, fontweight="bold")
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, f"{value}_heatmap.png"), dpi=300)
+        plt.savefig(os.path.join(save_dir, f"{value}_heatmap_{csv_suffix}.png"), dpi=300)
         plt.close()
-    # 2. 核心指标折线图（AUC/best_hm/attr_acc）
+
+    # 2. 核心指标折线图（AUC/best_hm/attr_acc），原有逻辑不变
     for metric in ["AUC", "best_hm", "attr_acc"]:
         plt.figure(figsize=(12, 6))
         for param2_val in TUNE_VALS2:
@@ -479,7 +484,7 @@ def visualize_results(save_dir, csv_path, core_metrics):
         plt.savefig(os.path.join(save_dir, f"{metric}_lineplot_{csv_suffix}.png"), dpi=300)
         plt.close()
 
-    # 3. 保存最优参数（按AUC最大化，自适应调参参数）
+    # 3. 保存最优参数（按AUC最大化，自适应调参参数），原有逻辑不变
     best_idx = df["AUC"].idxmax()
     best_row = df.loc[best_idx]
     best_params = {
@@ -487,14 +492,14 @@ def visualize_results(save_dir, csv_path, core_metrics):
         f"best_{TUNE_PARAM2}": float(best_row[TUNE_PARAM2]),
         **{k: float(best_row[k]) for k in core_metrics}
     }
-    # 保存最优参数到JSON，全量数据到Excel
+    # 保存最优参数到JSON，全量调参数据到Excel
     best_param_path = os.path.join(save_dir, f"best_params_{csv_suffix}.json")
     excel_path = os.path.join(save_dir, f"tune_metrics_{csv_suffix}.xlsx")
     with open(best_param_path, 'w', encoding='utf-8') as f:
         json.dump(best_params, f, indent=4)
     df.to_excel(excel_path, index=False)
 
-    # 醒目打印最优参数
+    # 醒目打印最优参数及核心指标，控制台直观展示
     print("\n" + "="*80)
     print(f"✅ 调参完成！use_robust_cache={use_robust_cache} 最优参数如下：")
     print("="*80)
@@ -507,8 +512,7 @@ def visualize_results(save_dir, csv_path, core_metrics):
         else:
             print(f"📊 {k:12s}：{best_params[k]:.2%}")
     print("="*80)
-    print(f"📁 所有结果已保存至：{os.path.abspath(save_dir)}")
-
+    print(f"📁 所有调参结果已保存至：{os.path.abspath(save_dir)}")
 # ====================== 主函数：网格搜索主流程（全自动，无人工干预） ======================
 def main():
     # 第一步：初始化调参参数（从YML读取，自动匹配）
