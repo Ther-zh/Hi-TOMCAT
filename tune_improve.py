@@ -27,16 +27,16 @@ torch.backends.cudnn.benchmark = False
 
 # ====================== ✅ 仅需用户修改这5项 ✅ 其余全由YML控制 ======================
 CFG_PATH = "config/ut-zappos.yml"  # 你的主YML配置文件路径
-SAVE_DIR = "tune_improve_final"    # 调参结果保存目录（自动创建）
-SWANLAB_PROJECT = "Tune-Improve-Final"  # SwanLab项目名
+SAVE_DIR = "tune_improve_on2"    # 调参结果保存目录（自动创建）
+SWANLAB_PROJECT = "Tune-Improve2"  # SwanLab项目名
 # 调参参数范围：按场景预留，脚本会根据YML中的use_robust_cache自动匹配
 TUNE_PARAMS_SCOPE = {
     # 场景1：YML中use_robust_cache=False（仅改进一）→ 调这两个
     "lambda_orth": [2,3,4,5,6,7,8,9,10],  # 正交损失权重
-    "hier_theta": [1.3,1.6],               # 自适应更新温度系数
+    "hier_theta": [4.5,5,5.5,6,6.5,7],               # 自适应更新温度系数
     # 场景2：YML中use_robust_cache=True（改进一+二）→ 调这两个
-    "sim_threshold": [0.2, 0.25, 0.3],           # 缓存入队相似度阈值
-    "correction_interval": [10, 20, 30]          # 缓存周期性修正步长
+    "sim_threshold": [0.05,0.10,0.15,0.20],           # 缓存入队相似度阈值
+    "correction_interval": [10 ,15, 20,25,30,35,40]          # 缓存周期性修正步长
 }
 # 要记录的核心指标（和swan_test2.py输出完全一致，无需修改）
 CORE_METRICS = ["AUC", "best_hm", "attr_acc", "best_seen", "best_unseen", "obj_acc", "biasterm"]
@@ -436,6 +436,8 @@ def visualize_results(save_dir, csv_path, core_metrics):
     import pandas as pd
     import json
     import matplotlib.pyplot as plt
+    import os  # 补充缺失的os导入，原代码用到了os.path却没导入
+    
     # 加载并过滤有效数据（剔除AUC<=0/空值的无效实验）
     df = pd.read_csv(csv_path)
     df = df.dropna(subset=["AUC"])
@@ -447,12 +449,31 @@ def visualize_results(save_dir, csv_path, core_metrics):
     # 场景后缀，用于文件名
     csv_suffix = "robustcache_on" if use_robust_cache else "robustcache_off"
 
-    # 1. 多指标热力图（AUC/best_hm/attr_acc），修复param_names未定义问题
+    # 1. 多指标热力图（AUC/best_hm/attr_acc），修复刻度+param_names+os缺失问题
     for value in ["AUC", "best_hm", "attr_acc"]:
         plt.figure(figsize=(10,8))
         # 核心修复：用全局TUNE_PARAM1/TUNE_PARAM2替换未定义的param_names
         pivot = df.pivot(index=TUNE_PARAM1, columns=TUNE_PARAM2, values=value)
+        # 【可选优化】按数值排序pivot的行列，让热力图按参数大小顺序展示（避免乱序）
+        pivot = pivot.sort_index(ascending=True).sort_index(axis=1, ascending=True)
         im = plt.imshow(pivot, cmap="YlGnBu", aspect="auto")
+        
+        # ===================== 核心修改：设置实际数值刻度 =====================
+        # x轴：刻度位置=列索引，刻度标签=pivot列的实际参数值（保留4位小数，可按需修改）
+        plt.xticks(
+            range(len(pivot.columns)),  # 刻度位置：0,1,2...
+            [f"{x:.4f}" for x in pivot.columns],  # 刻度标签：实际参数值
+            fontsize=10, 
+            rotation=45  # 旋转45度，避免标签重叠（可根据需要改0/30/60）
+        )
+        # y轴：刻度位置=行索引，刻度标签=pivot行的实际参数值
+        plt.yticks(
+            range(len(pivot.index)), 
+            [f"{x:.4f}" for x in pivot.index], 
+            fontsize=10
+        )
+        # =====================================================================
+        
         # 数值标注，保留4位小数
         for i in range(len(pivot.index)):
             for j in range(len(pivot.columns)):
@@ -462,7 +483,7 @@ def visualize_results(save_dir, csv_path, core_metrics):
         plt.xlabel(TUNE_PARAM2, fontsize=14, fontweight="bold")
         plt.ylabel(TUNE_PARAM1, fontsize=14, fontweight="bold")
         plt.title(f"{value} Heatmap (Higher is Better)", fontsize=16, fontweight="bold")
-        plt.tight_layout()
+        plt.tight_layout()  # 自动调整布局，适配旋转后的标签
         plt.savefig(os.path.join(save_dir, f"{value}_heatmap_{csv_suffix}.png"), dpi=300)
         plt.close()
 

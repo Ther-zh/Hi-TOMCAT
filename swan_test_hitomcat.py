@@ -146,7 +146,6 @@ class RobustPriorityQueue:
     def get_cache_data(self, feat_dim):
         """
         空缓存时返回维度为[0, num_total_classes]的cache_values，避免越界
-        此方法完全未修改，原始/改进二逻辑一致
         """
         cache_keys = []
         cache_values = []

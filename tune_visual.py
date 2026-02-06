@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # ====================== ✅ 仅需用户修改这2项 ✅ ======================
-SAVE_DIR = "tune_improve_final"    # 调参结果CSV所在的保存目录（和原脚本一致）
+SAVE_DIR = "tion"    # 调参结果CSV所在的保存目录（和原脚本一致）
 CORE_METRICS = ["AUC", "best_hm", "attr_acc", "best_seen", "best_unseen", "obj_acc", "biasterm"]  # 和原脚本一致
 
 # ====================== 全局配置：解决Linux/Windows中文/负号显示问题 ======================

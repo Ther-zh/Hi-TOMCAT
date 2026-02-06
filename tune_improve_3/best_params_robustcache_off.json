@@ -1,0 +1,11 @@
+{
+    "best_lambda_orth": 3.0,
+    "best_hier_theta": 7.0,
+    "best_AUC": 0.4421,
+    "best_hm": 0.5688,
+    "attr_acc": 0.5806,
+    "best_seen": 0.6843,
+    "best_unseen": 0.7292,
+    "obj_acc": 0.7433,
+    "biasterm": 2.8749
+}
