@@ -187,8 +187,6 @@ if __name__ == "__main__":
             workspace="zzhTher",
             config=vars(config),
             mode=swanlab_mode
-            # 移除：name="run-20260119_170627" （固定name是续训用，全新实验自动生成即可）
-            # 移除：resume=config.swanlab_resume （续训参数）
         )
 
     # 打印训练基础信息
@@ -244,8 +242,6 @@ if __name__ == "__main__":
     optimizer = get_optimizer(model, config)
     scheduler = get_scheduler(optimizer, config, len(train_dataloader))
 
-    # ====================== 移除：续训时加载预训练权重的逻辑 ======================
-    # （全新训练不需要加载旧权重，直接从随机初始化开始）
 
     try:
         # 开始训练

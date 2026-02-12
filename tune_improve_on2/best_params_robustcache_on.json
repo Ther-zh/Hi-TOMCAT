@@ -1,0 +1,11 @@
+{
+    "best_sim_threshold": 0.05,
+    "best_correction_interval": 40.0,
+    "AUC": 0.43662784438081,
+    "best_hm": 0.5637641044534977,
+    "attr_acc": 0.5833905339241028,
+    "best_seen": 0.6783968806266785,
+    "best_unseen": 0.73135906457901,
+    "obj_acc": 0.741592288017273,
+    "biasterm": 2.9999001026153564
+}

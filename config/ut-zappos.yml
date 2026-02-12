@@ -17,14 +17,14 @@ train:
   scheduler: StepLR
   step_size: 5
   gamma: 0.5
-  lr: 0.0005
+  lr: 0.001
   attr_dropout: 0.3
   weight_decay: 0.00001
   context_length: 10
   train_batch_size: 32
   gradient_accumulation_steps: 4
   seed: 0
-  epochs: 100
+  epochs: 50
   epoch_start: 0
 
   val_metric: best_AUC
@@ -74,16 +74,16 @@ tta:
   hier_theta: 7  # AUW的温度系数
 
   # 方案二：稳健记忆库超参数
-  use_robust_cache: True
+  use_robust_cache: False
   correction_interval: 20  # 周期性修正间隔
   sim_threshold: 0.20       # 入队相似度阈值（过滤低于sim_threshold的离群点）
 
 others:
   device: cuda:0 #Your_Device
-  save_path: ./result/ut-zappos/20250305_2 #Your_Save_Path
+  save_path: /root/autodl-tmp/2026212 #Your_Save_Path ./result/ut-zappos/20250305_2
 
-  load_model: ./result/ut-zappos/20250305_2/test_best.pt
-  load_model_path: ./result/ut-zappos/20250305_2
+  load_model: /root/autodl-tmp/2026212/test_best.pt #Your_Save_Path ./result/ut-zappos/20250305_2/test_best.pt
+  load_model_path: /root/autodl-tmp/2026212 #Your_Save_Path ./result/ut-zappos/20250305_2
 
   wandb_net: online
   use_wandb: True

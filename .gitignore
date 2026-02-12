@@ -33,5 +33,4 @@ autodl*  # 容器相关文件
 # 5. 过滤临时/测试文件
 ablation_results/
 visualization.py  # 如果是本地测试文件
-mk.py
-swanlab_test.py
+
